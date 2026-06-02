@@ -6,7 +6,7 @@ from .settings import get_settings
 from .store import MemeScoutStore
 
 
-def approve_paper_buy(signal_id: int, store: MemeScoutStore | None = None) -> str:
+def approve_paper_buy(signal_id: int, store: MemeScoutStore | None = None, entry_mode: str = "manual_approval", size_override: float | None = None, auto_entry_reason: str | None = None) -> str:
     store = store or MemeScoutStore()
     settings = get_settings()
     if not settings.paper_only:
@@ -24,7 +24,8 @@ def approve_paper_buy(signal_id: int, store: MemeScoutStore | None = None) -> st
 
     features = signal["features"]
     balance = float(store.get_state("paper_balance_usdc", str(settings.default_balance_usdc)))
-    size = min(settings.trade_size_usdc, balance)
+    requested_size = size_override if size_override is not None else settings.trade_size_usdc
+    size = min(requested_size, balance)
     if size <= 0:
         return "Paper wallet has no USDC left."
     raw_price = float(features.get("price_usd") or 0)
@@ -46,10 +47,18 @@ def approve_paper_buy(signal_id: int, store: MemeScoutStore | None = None) -> st
         "trailing_stop_pct": settings.trailing_stop_pct,
         "slippage_bps": slippage_bps,
         "paper_only": True,
+        "entry_mode": entry_mode,
+        "exit_mode": settings.exit_mode,
     }
-    trade_id = store.add_paper_trade(signal, entry_price, size, quantity, plan)
+    trade_id = store.add_paper_trade(signal, entry_price, size, quantity, plan, entry_mode=entry_mode, auto_entry_reason=auto_entry_reason)
     store.set_signal_status(signal_id, "approved")
-    return f"✅ Paper buy opened only. Trade #{trade_id}: ${size:.2f} at simulated price ${entry_price:.8f}."
+    prefix = "🤖 AUTO PAPER BUY opened" if entry_mode == "auto_paper" else "✅ Paper buy opened only"
+    return f"{prefix}. Trade #{trade_id}: ${size:.2f} at simulated price ${entry_price:.8f}."
+
+
+def auto_paper_buy(signal_id: int, store: MemeScoutStore | None = None) -> str:
+    settings = get_settings()
+    return approve_paper_buy(signal_id, store, entry_mode="auto_paper", size_override=settings.auto_trade_size_usdc, auto_entry_reason="eligible signal met auto-paper constraints")
 
 
 def simulate_paper_sell(trade_id: int, market_price: float, store: MemeScoutStore | None = None) -> str:

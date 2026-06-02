@@ -164,6 +164,41 @@ async def memescout_strategy_status_command(update: Update, context: ContextType
     await update.message.reply_text(f"{status['strategy_id']}: enabled={status['enabled']}")
 
 
+@admin_required
+async def memescout_mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(_mode_text())
+
+
+@admin_required
+async def memescout_set_entry_mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    mode = _first_text_arg(context)
+    if mode not in {"manual_approval", "auto_paper", "observe_only"}:
+        await update.message.reply_text("Usage: /memescout_set_entry_mode <manual_approval|auto_paper|observe_only>")
+        return
+    MemeScoutStore().set_state("entry_mode_override", mode)
+    await update.message.reply_text(f"✅ Entry mode override set: {mode}")
+
+
+@admin_required
+async def memescout_set_exit_mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    mode = _first_text_arg(context)
+    if mode not in {"auto", "manual_only"}:
+        await update.message.reply_text("Usage: /memescout_set_exit_mode <auto|manual_only>")
+        return
+    MemeScoutStore().set_state("exit_mode_override", mode)
+    await update.message.reply_text(f"✅ Exit mode override set: {mode}")
+
+
+@admin_required
+async def memescout_auto_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(_auto_report_text())
+
+
+@admin_required
+async def memescout_auto_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(_auto_report_text())
+
+
 @restricted
 async def memescout_daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(_daily_text())
@@ -252,6 +287,8 @@ def _status_text(store: MemeScoutStore | None = None) -> str:
         f"open_paper_trades: {stats['open_trades']}\n"
         f"closed_paper_trades: {stats['closed_trades']}\n"
         f"paper_balance: ${stats['paper_balance_usdc']:.2f} USDC\n"
+        f"entry_mode: {_effective_entry_mode(store)}\n"
+        f"exit_mode: {_effective_exit_mode(store)}\n"
         f"scanner_loop_running: {status['scanner_loop_running']}\n"
         f"monitor_loop_running: {status['monitor_loop_running']}\n"
         f"last_scan_at: {status['last_scan_at']}\n"
@@ -377,7 +414,8 @@ def _pnl_text(store: MemeScoutStore | None = None) -> str:
         f"Profit factor: {stats['profit_factor']}\n"
         f"Max drawdown: ${stats['drawdown']:.2f}\n"
         f"Best trade: ${stats['best_trade']:.2f}\n"
-        f"Worst trade: ${stats['worst_trade']:.2f}"
+        f"Worst trade: ${stats['worst_trade']:.2f}\n"
+        f"{_entry_mode_split_text(store or MemeScoutStore())}"
     )
 
 
@@ -402,6 +440,7 @@ def _daily_text(store: MemeScoutStore | None = None) -> str:
         f"Best/worst trade: ${stats['best_trade']:.2f} / ${stats['worst_trade']:.2f}\n"
         f"Stoploss hits: {stats['stoploss_hits']}\n"
         f"TP1/TP2/trailing exits: {stats['tp1_hits']}/{stats['tp2_hits']}/{stats['trailing_stop_hits']}\n"
+        f"{_entry_mode_split_text(store)}\n"
         f"{warning}"
     )
 
@@ -415,6 +454,62 @@ def _signals_text(store: MemeScoutStore | None = None, limit: int = 10) -> str:
         lines.append(f"#{row['id']} {row['token_symbol']} score={row['score']} status={row['status']}")
     return "\n".join(lines)
 
+
+
+def _effective_entry_mode(store: MemeScoutStore) -> str:
+    return store.get_state("entry_mode_override", get_settings().entry_mode)
+
+
+def _effective_exit_mode(store: MemeScoutStore) -> str:
+    return store.get_state("exit_mode_override", get_settings().exit_mode)
+
+
+def _mode_text(store: MemeScoutStore | None = None) -> str:
+    store = store or MemeScoutStore()
+    return (
+        "⚙️ MemeScout Mode\n"
+        f"entry_mode: {_effective_entry_mode(store)}\n"
+        f"exit_mode: {_effective_exit_mode(store)}\n"
+        "All modes are paper-only; auto_paper opens simulated trades only."
+    )
+
+
+def _entry_mode_split_text(store: MemeScoutStore) -> str:
+    trades = store.trades_by_entry_mode()
+    manual = [t for t in trades if t.get("entry_mode") != "auto_paper"]
+    auto = [t for t in trades if t.get("entry_mode") == "auto_paper"]
+    observed = store.stats()["signals"] - len(trades)
+    return f"Manual approved paper trades: {len(manual)} | Auto paper trades: {len(auto)} | Observe-only signals: {max(0, observed)}"
+
+
+def _auto_report_text(store: MemeScoutStore | None = None) -> str:
+    store = store or MemeScoutStore()
+    auto = store.trades_by_entry_mode("auto_paper")
+    closed = [t for t in auto if t.get("status") == "closed"]
+    pnl = [float(t.get("realized_pnl") or 0) for t in closed]
+    wins = [p for p in pnl if p > 0]
+    losses = [p for p in pnl if p < 0]
+    reasons: dict[str, int] = {}
+    strategies: dict[str, int] = {}
+    for t in closed:
+        reasons[t.get("exit_reason") or "unknown"] = reasons.get(t.get("exit_reason") or "unknown", 0) + 1
+        strategies[t.get("strategy_id") or "unknown"] = strategies.get(t.get("strategy_id") or "unknown", 0) + 1
+    gross_profit = sum(wins)
+    gross_loss = abs(sum(losses))
+    return (
+        "🤖 MemeScout Auto Paper Report\n"
+        f"total_auto_entries: {len(auto)}\n"
+        f"open_auto_positions: {sum(1 for t in auto if t.get('status') == 'open')}\n"
+        f"closed_auto_positions: {len(closed)}\n"
+        f"win_rate: {(len(wins) / len(closed) * 100 if closed else 0):.2f}%\n"
+        f"average_win: ${(gross_profit / len(wins) if wins else 0):.2f}\n"
+        f"average_loss: ${(sum(losses) / len(losses) if losses else 0):.2f}\n"
+        f"profit_factor: {(gross_profit / gross_loss if gross_loss else 0):.2f}\n"
+        f"best_trade: ${(max(pnl) if pnl else 0):.2f}\n"
+        f"worst_trade: ${(min(pnl) if pnl else 0):.2f}\n"
+        f"exit_reasons: {_fmt_dict(reasons)}\n"
+        f"strategy_performance_closed_count: {_fmt_dict(strategies)}"
+    )
 
 
 def _fmt_dict(values: dict | None) -> str:

@@ -15,6 +15,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from condor.memescout_ai.dexscreener import DexScreenerClient, pair_to_features
 from condor.memescout_ai.llm import explain_signal, rule_based_explanation
+from condor.memescout_ai.paper import auto_paper_buy
 from condor.memescout_ai.scoring import SUPPORTED_STRATEGIES, candidate_strategies, score_strategy_signal
 from condor.memescout_ai.settings import get_settings
 from condor.memescout_ai.store import MemeScoutStore
@@ -224,15 +225,25 @@ async def scan_once_summary(config: Config, context: Any, store: MemeScoutStore 
                 if not verdict["eligible"] and verdict["score"] >= 52:
                     _record_close(summary, features, verdict)
 
-                should_send = signal_id is not None and (verdict["eligible"] or config.send_rejected) and strategy_id != "rug_defense_only"
-                if should_send:
-                    if store.counter_value("telegram_signals_sent", 3600) >= settings.max_signals_per_hour:
-                        summary.telegram_signal_rate_limited = True
+                if signal_id is not None and strategy_id != "rug_defense_only":
+                    entry_mode = store.get_state("entry_mode_override", settings.entry_mode)
+                    if entry_mode == "auto_paper" and verdict["eligible"]:
+                        message = _try_auto_entry(store, signal_id, signal, settings)
+                        if message:
+                            await send_auto_notification(context, chat_id, signal_id, signal, message)
+                    elif entry_mode == "observe_only":
+                        if verdict["eligible"] or config.send_rejected:
+                            await send_watch_notification(context, chat_id, signal_id, signal)
                     else:
-                        sent = await send_signal(context, chat_id, signal_id, signal)
-                        if sent:
-                            summary.telegram_signals_sent += 1
-                            store.increment_counter("telegram_signals_sent", 1, 3600)
+                        should_send = verdict["eligible"] or config.send_rejected
+                        if should_send:
+                            if store.counter_value("telegram_signals_sent", 3600) >= settings.max_signals_per_hour:
+                                summary.telegram_signal_rate_limited = True
+                            else:
+                                sent = await send_signal(context, chat_id, signal_id, signal)
+                                if sent:
+                                    summary.telegram_signals_sent += 1
+                                    store.increment_counter("telegram_signals_sent", 1, 3600)
         if processed >= config.max_pairs_per_scan:
             break
     if summary.telegram_signals_sent:
@@ -315,6 +326,21 @@ def _record_close(summary: ScanSummary, features: dict[str, Any], verdict: dict[
     summary.close_to_eligibility = sorted(summary.close_to_eligibility, key=lambda item: float(item.get("score") or 0), reverse=True)[:5]
 
 
+def _try_auto_entry(store: MemeScoutStore, signal_id: int, signal: dict[str, Any], settings: Any) -> str | None:
+    if not settings.paper_only or store.bool_state("emergency_stop") or store.bool_state("paused"):
+        return None
+    if len(store.list_open_trades()) >= settings.auto_max_open_positions:
+        return None
+    features = signal.get("features") or {}
+    if float(signal.get("score") or 0) < settings.auto_min_score:
+        return None
+    if float(features.get("rug_risk_score") or 100) > settings.auto_max_rug_risk:
+        return None
+    if store.has_recent_auto_trade(signal["token_mint"], settings.auto_cooldown_same_token_seconds):
+        return None
+    return auto_paper_buy(signal_id, store)
+
+
 async def send_signal(context: Any, chat_id: int | None, signal_id: int, signal: dict[str, Any]) -> bool:
     if not chat_id:
         return False
@@ -327,6 +353,33 @@ async def send_signal(context: Any, chat_id: int | None, signal_id: int, signal:
     )
     text = format_signal(signal_id, signal, features)
     await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard, disable_web_page_preview=True)
+    return True
+
+
+async def send_watch_notification(context: Any, chat_id: int | None, signal_id: int, signal: dict[str, Any]) -> bool:
+    if not chat_id:
+        return False
+    text = format_signal(signal_id, signal, signal["features"]).replace("ELIGIBLE FOR PAPER APPROVAL", "OBSERVE ONLY WATCHLIST")
+    await context.bot.send_message(chat_id=chat_id, text=text, disable_web_page_preview=True)
+    return True
+
+
+async def send_auto_notification(context: Any, chat_id: int | None, signal_id: int, signal: dict[str, Any], result: str) -> bool:
+    if not chat_id:
+        return False
+    f = signal["features"]
+    settings = get_settings()
+    text = (
+        f"🤖 AUTO PAPER BUY opened\n"
+        f"Signal #{signal_id} / {signal['token_symbol']} / strategy={signal.get('strategy_id')}\n"
+        f"{result}\n"
+        f"Score: {signal.get('score')} | Rug risk: {f.get('rug_risk_score')}/100\n"
+        f"Entry price source: ${float(f.get('price_usd') or 0):.8f} | Size: ${settings.auto_trade_size_usdc:.2f} paper USDC\n"
+        f"Stoploss: {settings.stop_loss_pct:.0f}% | TP: 50% at 2x, 25% at 4x, trailing rest\n"
+        f"Reason: {f.get('strategy_match_reason', 'eligible deterministic signal')}\n"
+        "Paper-only. No wallet or real order was used."
+    )
+    await context.bot.send_message(chat_id=chat_id, text=text, disable_web_page_preview=True)
     return True
 
 

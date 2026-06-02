@@ -271,9 +271,11 @@ def register_handlers(application: Application) -> None:
             memescout_backup_command, memescout_callback_handler, memescout_command,
             memescout_daily_command, memescout_debug_last_scan_command,
             memescout_emergency_stop_command, memescout_force_close_paper_command,
-            memescout_loop_status_command, memescout_monitor_start_command,
+            memescout_auto_report_command, memescout_auto_status_command, memescout_loop_status_command,
+            memescout_mode_command, memescout_monitor_start_command,
             memescout_monitor_stop_command, memescout_pause_command, memescout_pnl_command,
-            memescout_reset_hourly_limits_command, memescout_strategies_command,
+            memescout_reset_hourly_limits_command, memescout_set_entry_mode_command,
+            memescout_set_exit_mode_command, memescout_strategies_command,
             memescout_strategy_disable_command, memescout_strategy_enable_command,
             memescout_strategy_status_command,
             memescout_position_command, memescout_positions_command, memescout_resume_command,
@@ -302,6 +304,11 @@ def register_handlers(application: Application) -> None:
         application.add_handler(CommandHandler("memescout_loop_status", memescout_loop_status_command))
         application.add_handler(CommandHandler("memescout_debug_last_scan", memescout_debug_last_scan_command))
         application.add_handler(CommandHandler("memescout_reset_hourly_limits", memescout_reset_hourly_limits_command))
+        application.add_handler(CommandHandler("memescout_mode", memescout_mode_command))
+        application.add_handler(CommandHandler("memescout_set_entry_mode", memescout_set_entry_mode_command))
+        application.add_handler(CommandHandler("memescout_set_exit_mode", memescout_set_exit_mode_command))
+        application.add_handler(CommandHandler("memescout_auto_status", memescout_auto_status_command))
+        application.add_handler(CommandHandler("memescout_auto_report", memescout_auto_report_command))
         application.add_handler(CommandHandler("memescout_strategies", memescout_strategies_command))
         application.add_handler(CommandHandler("memescout_strategy_enable", memescout_strategy_enable_command))
         application.add_handler(CommandHandler("memescout_strategy_disable", memescout_strategy_disable_command))
@@ -332,10 +339,12 @@ def register_handlers(application: Application) -> None:
     from handlers.memescout_ai import (
         memescout_backup_command, memescout_callback_handler, memescout_command, memescout_daily_command,
         memescout_debug_last_scan_command, memescout_emergency_stop_command,
-        memescout_force_close_paper_command, memescout_loop_status_command,
+        memescout_force_close_paper_command, memescout_auto_report_command,
+        memescout_auto_status_command, memescout_loop_status_command, memescout_mode_command,
         memescout_monitor_start_command, memescout_monitor_stop_command, memescout_pause_command,
         memescout_pnl_command, memescout_position_command, memescout_positions_command,
-        memescout_reset_hourly_limits_command, memescout_strategies_command,
+        memescout_reset_hourly_limits_command, memescout_set_entry_mode_command,
+            memescout_set_exit_mode_command, memescout_strategies_command,
         memescout_strategy_disable_command, memescout_strategy_enable_command,
         memescout_strategy_status_command,
         memescout_resume_command, memescout_signals_command, memescout_start_command,
@@ -389,6 +398,11 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("memescout_loop_status", memescout_loop_status_command))
     application.add_handler(CommandHandler("memescout_debug_last_scan", memescout_debug_last_scan_command))
     application.add_handler(CommandHandler("memescout_reset_hourly_limits", memescout_reset_hourly_limits_command))
+    application.add_handler(CommandHandler("memescout_mode", memescout_mode_command))
+    application.add_handler(CommandHandler("memescout_set_entry_mode", memescout_set_entry_mode_command))
+    application.add_handler(CommandHandler("memescout_set_exit_mode", memescout_set_exit_mode_command))
+    application.add_handler(CommandHandler("memescout_auto_status", memescout_auto_status_command))
+    application.add_handler(CommandHandler("memescout_auto_report", memescout_auto_report_command))
     application.add_handler(CommandHandler("memescout_strategies", memescout_strategies_command))
     application.add_handler(CommandHandler("memescout_strategy_enable", memescout_strategy_enable_command))
     application.add_handler(CommandHandler("memescout_strategy_disable", memescout_strategy_disable_command))
@@ -493,6 +507,9 @@ async def post_init(application: Application) -> None:
             BotCommand("memescout_monitor_stop", "Stop MemeScout monitor loop"),
             BotCommand("memescout_debug_last_scan", "Debug last MemeScout scan"),
             BotCommand("memescout_reset_hourly_limits", "Reset MemeScout hourly counters"),
+            BotCommand("memescout_mode", "Show MemeScout entry/exit mode"),
+            BotCommand("memescout_auto_status", "Show auto-paper status"),
+            BotCommand("memescout_auto_report", "Show auto-paper report"),
             BotCommand("memescout_strategies", "List MemeScout strategies"),
             BotCommand("memescout_strategy_enable", "Enable a MemeScout strategy"),
             BotCommand("memescout_strategy_disable", "Disable a MemeScout strategy"),

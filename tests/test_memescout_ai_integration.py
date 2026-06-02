@@ -489,3 +489,101 @@ def test_strategy_enable_disable_commands_work(store, monkeypatch):
     assert store.get_state("strategy:pullback_reentry:enabled") == "true"
     asyncio.run(memescout_strategies_command.__wrapped__(update, enable_context))
     assert "pullback_reentry" in update.message.replies[-1][0]
+
+
+
+def test_auto_paper_opens_trade_without_telegram_approval(store, monkeypatch):
+    monkeypatch.setenv("MEMESCOUT_ENTRY_MODE", "auto_paper")
+    monkeypatch.setenv("MEMESCOUT_AUTO_MIN_SCORE", "1")
+    monkeypatch.setenv("MEMESCOUT_AUTO_MAX_RUG_RISK", "100")
+    context = FakeContext()
+    with patch("routines.memescout_ai.DexScreenerClient") as client_cls:
+        client_cls.return_value.latest_solana_pairs = AsyncMock(return_value=[good_pair("AUTO", "AutoMint", "AutoPair")])
+        summary = asyncio.run(scan_once_summary(Config(max_pairs_per_scan=1), context, store, context._chat_id))
+    assert summary.eligible_count == 1
+    assert store.stats()["open_trades"] == 1
+    trade = store.list_open_trades()[0]
+    assert trade["entry_mode"] == "auto_paper"
+    assert any("AUTO PAPER BUY opened" in msg["text"] for msg in context.bot.sent)
+
+
+def test_observe_only_never_opens_trade(store, monkeypatch):
+    monkeypatch.setenv("MEMESCOUT_ENTRY_MODE", "observe_only")
+    context = FakeContext()
+    with patch("routines.memescout_ai.DexScreenerClient") as client_cls:
+        client_cls.return_value.latest_solana_pairs = AsyncMock(return_value=[good_pair("OBS", "ObsMint", "ObsPair")])
+        asyncio.run(scan_once_summary(Config(max_pairs_per_scan=1), context, store, context._chat_id))
+    assert store.stats()["open_trades"] == 0
+
+
+def test_manual_approval_still_requires_approve(store, monkeypatch):
+    monkeypatch.setenv("MEMESCOUT_ENTRY_MODE", "manual_approval")
+    context = FakeContext()
+    with patch("routines.memescout_ai.DexScreenerClient") as client_cls:
+        client_cls.return_value.latest_solana_pairs = AsyncMock(return_value=[good_pair("MAN", "ManMint", "ManPair")])
+        asyncio.run(scan_once_summary(Config(max_pairs_per_scan=1), context, store, context._chat_id))
+    assert store.stats()["open_trades"] == 0
+    signal_id = store.list_signals(1)[0]["id"]
+    assert "Paper buy opened" in approve_paper_buy(signal_id, store)
+
+
+def test_auto_paper_respects_max_open_positions(store, monkeypatch):
+    monkeypatch.setenv("MEMESCOUT_ENTRY_MODE", "auto_paper")
+    monkeypatch.setenv("MEMESCOUT_AUTO_MAX_OPEN_POSITIONS", "0")
+    monkeypatch.setenv("MEMESCOUT_AUTO_MIN_SCORE", "1")
+    monkeypatch.setenv("MEMESCOUT_AUTO_MAX_RUG_RISK", "100")
+    context = FakeContext()
+    with patch("routines.memescout_ai.DexScreenerClient") as client_cls:
+        client_cls.return_value.latest_solana_pairs = AsyncMock(return_value=[good_pair("MAX", "MaxMint", "MaxPair")])
+        asyncio.run(scan_once_summary(Config(max_pairs_per_scan=1), context, store, context._chat_id))
+    assert store.stats()["open_trades"] == 0
+
+
+def test_auto_paper_respects_score_and_rug_thresholds(store, monkeypatch):
+    monkeypatch.setenv("MEMESCOUT_ENTRY_MODE", "auto_paper")
+    monkeypatch.setenv("MEMESCOUT_AUTO_MIN_SCORE", "99")
+    monkeypatch.setenv("MEMESCOUT_AUTO_MAX_RUG_RISK", "1")
+    context = FakeContext()
+    with patch("routines.memescout_ai.DexScreenerClient") as client_cls:
+        client_cls.return_value.latest_solana_pairs = AsyncMock(return_value=[good_pair("THR", "ThrMint", "ThrPair")])
+        asyncio.run(scan_once_summary(Config(max_pairs_per_scan=1), context, store, context._chat_id))
+    assert store.stats()["open_trades"] == 0
+
+
+def test_auto_paper_respects_same_token_cooldown(store, monkeypatch):
+    monkeypatch.setenv("MEMESCOUT_ENTRY_MODE", "auto_paper")
+    monkeypatch.setenv("MEMESCOUT_AUTO_MIN_SCORE", "1")
+    monkeypatch.setenv("MEMESCOUT_AUTO_MAX_RUG_RISK", "100")
+    monkeypatch.setenv("MEMESCOUT_AUTO_COOLDOWN_SAME_TOKEN_SECONDS", "7200")
+    context = FakeContext()
+    with patch("routines.memescout_ai.DexScreenerClient") as client_cls:
+        client_cls.return_value.latest_solana_pairs = AsyncMock(return_value=[good_pair("COOL", "CoolMint", "CoolPair")])
+        asyncio.run(scan_once_summary(Config(max_pairs_per_scan=1), context, store, context._chat_id))
+    # Different strategy/pair for same mint would otherwise be allowed, but auto cooldown blocks the second auto entry.
+    store.set_state("strategy:fresh_launch:enabled", "false")
+    with patch("routines.memescout_ai.DexScreenerClient") as client_cls:
+        client_cls.return_value.latest_solana_pairs = AsyncMock(return_value=[good_pair("COOL", "CoolMint", "CoolPair2")])
+        asyncio.run(scan_once_summary(Config(max_pairs_per_scan=1), context, store, context._chat_id))
+    assert len(store.trades_by_entry_mode("auto_paper")) == 1
+
+
+def test_emergency_stop_blocks_auto_entries(store, monkeypatch):
+    monkeypatch.setenv("MEMESCOUT_ENTRY_MODE", "auto_paper")
+    store.set_state("emergency_stop", "true")
+    context = FakeContext()
+    with patch("routines.memescout_ai.DexScreenerClient") as client_cls:
+        client_cls.return_value.latest_solana_pairs = AsyncMock(return_value=[good_pair("STOP", "StopMint", "StopPair")])
+        asyncio.run(scan_once_summary(Config(max_pairs_per_scan=1), context, store, context._chat_id))
+    assert store.stats()["open_trades"] == 0
+
+
+def test_auto_report_splits_manual_vs_auto_trades(store, monkeypatch):
+    monkeypatch.setenv("MEMESCOUT_ENTRY_MODE", "auto_paper")
+    monkeypatch.setenv("MEMESCOUT_AUTO_MIN_SCORE", "1")
+    monkeypatch.setenv("MEMESCOUT_AUTO_MAX_RUG_RISK", "100")
+    context = FakeContext()
+    with patch("routines.memescout_ai.DexScreenerClient") as client_cls:
+        client_cls.return_value.latest_solana_pairs = AsyncMock(return_value=[good_pair("REP", "RepMint", "RepPair")])
+        asyncio.run(scan_once_summary(Config(max_pairs_per_scan=1), context, store, context._chat_id))
+    text = _pnl_text(store)
+    assert "Auto paper trades: 1" in text

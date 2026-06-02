@@ -53,6 +53,7 @@ async def monitor_once(store: MemeScoutStore | None = None) -> dict[str, int]:
             logger.warning("MemeScout monitor skipped trade %s without crashing: %s", trade.get("id"), exc)
             store.mark_monitor_error(int(trade["id"]), f"price fetch failed: {exc}")
             store.set_state("last_monitor_error", str(exc)[:250])
+            _handle_stale_price(store, trade)
             results["errors"] += 1
             continue
 
@@ -61,8 +62,8 @@ async def monitor_once(store: MemeScoutStore | None = None) -> dict[str, int]:
         results["updated"] += 1
         if emergency_blocks_closes:
             continue
-        if updated:
-            await apply_exit_rules(store, updated, price)
+        if updated and store.get_state("exit_mode_override", settings.exit_mode) == "auto":
+            await apply_exit_rules(store, updated, price, features)
             after_exits = len(store.list_exits(int(trade["id"])))
             results["exits"] += max(0, after_exits - before_exits)
     if results["errors"] == 0:
@@ -71,7 +72,23 @@ async def monitor_once(store: MemeScoutStore | None = None) -> dict[str, int]:
     return results
 
 
-async def apply_exit_rules(store: MemeScoutStore, trade: dict[str, Any], price: float) -> None:
+def _handle_stale_price(store: MemeScoutStore, trade: dict[str, Any]) -> None:
+    settings = get_settings()
+    import time
+    last_update = float(trade.get("last_monitor_update_at") or trade.get("opened_at") or time.time())
+    stale_minutes = (time.time() - last_update) / 60
+    if stale_minutes < settings.stale_price_exit_minutes:
+        return
+    if settings.stale_price_action == "close":
+        price = float(trade.get("current_price") or trade.get("entry_price") or 0)
+        qty = float(trade.get("remaining_quantity") or 0)
+        if price > 0 and qty > 0:
+            store.record_exit(int(trade["id"]), price, qty, "stale_price")
+    else:
+        store.mark_monitor_error(int(trade["id"]), "stale_price")
+
+
+async def apply_exit_rules(store: MemeScoutStore, trade: dict[str, Any], price: float, features: dict[str, Any] | None = None) -> None:
     entry = float(trade["entry_price"])
     if entry <= 0 or price <= 0:
         return
@@ -81,7 +98,37 @@ async def apply_exit_rules(store: MemeScoutStore, trade: dict[str, Any], price: 
         return
     plan = trade.get("plan") or {}
     stop_loss_pct = abs(float(plan.get("stop_loss_pct", get_settings().stop_loss_pct)))
-    trailing_pct = float(plan.get("trailing_stop_pct", get_settings().trailing_stop_pct))
+    settings = get_settings()
+    trailing_pct = float(plan.get("trailing_stop_pct", settings.trailing_stop_pct))
+    features = features or {}
+
+    opened_at = float(trade.get("opened_at") or 0)
+    import time
+    age_minutes = max(0, (time.time() - opened_at) / 60) if opened_at else 0
+    if age_minutes >= settings.max_hold_minutes and not int(trade.get("tp1_triggered") or 0):
+        store.record_exit(int(trade["id"]), price, remaining_qty, "max_hold_time")
+        return
+
+    if settings.momentum_decay_exit:
+        buys = float(features.get("buys_5m") or 0)
+        sells = float(features.get("sells_5m") or 0)
+        if float(features.get("price_change_5m") or 0) < 0 and sells > buys * 1.2 and sells >= 5:
+            store.record_exit(int(trade["id"]), price, remaining_qty, "momentum_decay")
+            return
+
+    if settings.liquidity_drop_exit:
+        entry_liq = float((trade.get("entry_features") or {}).get("liquidity_usd") or 0)
+        current_liq = float(features.get("liquidity_usd") or 0)
+        if entry_liq > 0 and current_liq > 0 and current_liq <= entry_liq * (1 - settings.liquidity_drop_exit_pct / 100):
+            store.record_exit(int(trade["id"]), price, remaining_qty, "liquidity_drop")
+            return
+
+    if settings.sell_pressure_exit:
+        buys = float(features.get("buys_5m") or 0)
+        sells = float(features.get("sells_5m") or 0)
+        if sells >= max(5, buys * settings.sell_pressure_ratio_exit):
+            store.record_exit(int(trade["id"]), price, remaining_qty, "sell_pressure")
+            return
 
     if price <= entry * (1 - stop_loss_pct / 100):
         store.record_exit(int(trade["id"]), price, remaining_qty, "stoploss")

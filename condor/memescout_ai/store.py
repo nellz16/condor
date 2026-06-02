@@ -82,7 +82,17 @@ class MemeScoutStore:
                     trailing_stop_triggered INTEGER DEFAULT 0,
                     monitor_error TEXT,
                     last_monitor_update_at REAL,
-                    plan_json TEXT NOT NULL
+                    plan_json TEXT NOT NULL,
+                    entry_mode TEXT NOT NULL DEFAULT 'manual_approval',
+                    auto_entry_reason TEXT,
+                    score REAL DEFAULT 0,
+                    rug_risk REAL DEFAULT 0,
+                    entry_features_json TEXT,
+                    exit_mode TEXT DEFAULT 'auto',
+                    exit_reason TEXT,
+                    exit_rule_triggered TEXT,
+                    final_result TEXT,
+                    time_in_trade REAL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS paper_trade_exits (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,6 +147,16 @@ class MemeScoutStore:
             "trailing_stop_triggered": "ALTER TABLE paper_trades ADD COLUMN trailing_stop_triggered INTEGER DEFAULT 0",
             "monitor_error": "ALTER TABLE paper_trades ADD COLUMN monitor_error TEXT",
             "last_monitor_update_at": "ALTER TABLE paper_trades ADD COLUMN last_monitor_update_at REAL",
+            "entry_mode": "ALTER TABLE paper_trades ADD COLUMN entry_mode TEXT NOT NULL DEFAULT 'manual_approval'",
+            "auto_entry_reason": "ALTER TABLE paper_trades ADD COLUMN auto_entry_reason TEXT",
+            "score": "ALTER TABLE paper_trades ADD COLUMN score REAL DEFAULT 0",
+            "rug_risk": "ALTER TABLE paper_trades ADD COLUMN rug_risk REAL DEFAULT 0",
+            "entry_features_json": "ALTER TABLE paper_trades ADD COLUMN entry_features_json TEXT",
+            "exit_mode": "ALTER TABLE paper_trades ADD COLUMN exit_mode TEXT DEFAULT 'auto'",
+            "exit_reason": "ALTER TABLE paper_trades ADD COLUMN exit_reason TEXT",
+            "exit_rule_triggered": "ALTER TABLE paper_trades ADD COLUMN exit_rule_triggered TEXT",
+            "final_result": "ALTER TABLE paper_trades ADD COLUMN final_result TEXT",
+            "time_in_trade": "ALTER TABLE paper_trades ADD COLUMN time_in_trade REAL DEFAULT 0",
         }
         for col, sql in migrations.items():
             if col not in cols:
@@ -249,16 +269,29 @@ class MemeScoutStore:
         with self.connect() as db:
             db.execute("UPDATE signals SET status=?, reject_reason=? WHERE id=?", (status, reason, signal_id))
 
-    def add_paper_trade(self, signal: dict[str, Any], entry_price: float, size_usdc: float, quantity: float, plan: dict[str, Any]) -> int:
+    def has_recent_auto_trade(self, token_mint: str, seconds: int = 7200) -> bool:
+        cutoff = time.time() - seconds
+        with self.connect() as db:
+            row = db.execute(
+                """SELECT COUNT(*) AS c FROM paper_trades
+                WHERE entry_mode='auto_paper' AND token_mint=? AND opened_at >= ?""",
+                (token_mint, cutoff),
+            ).fetchone()
+        return int(row["c"]) > 0
+
+    def add_paper_trade(self, signal: dict[str, Any], entry_price: float, size_usdc: float, quantity: float, plan: dict[str, Any], entry_mode: str = "manual_approval", auto_entry_reason: str | None = None) -> int:
         with self.connect() as db:
             cur = db.execute(
                 """INSERT INTO paper_trades(signal_id, token_symbol, token_mint, pair_address, strategy_id, opened_at,
                 status, entry_price, size_usdc, quantity, remaining_quantity, remaining_size_usdc,
-                current_price, highest_price, lowest_price, plan_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                current_price, highest_price, lowest_price, plan_json, entry_mode, auto_entry_reason, score, rug_risk, entry_features_json, exit_mode)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (signal["id"], signal["token_symbol"], signal["token_mint"], signal["pair_address"],
                  signal.get("strategy_id", "momentum_continuation"), time.time(),
                  "open", entry_price, size_usdc, quantity, quantity, size_usdc, entry_price, entry_price, entry_price,
-                 json.dumps(plan, sort_keys=True)),
+                 json.dumps(plan, sort_keys=True), entry_mode, auto_entry_reason, float(signal.get("score") or 0),
+                 float((signal.get("features") or {}).get("rug_risk_score") or 0), json.dumps(signal.get("features") or {}, sort_keys=True),
+                 plan.get("exit_mode", "auto")),
             )
             row = db.execute("SELECT value FROM state WHERE key='paper_balance_usdc'").fetchone()
             balance = float(row["value"] if row else "100") - size_usdc
@@ -285,6 +318,8 @@ class MemeScoutStore:
     def _trade_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
         data["plan"] = json.loads(data.pop("plan_json"))
+        raw_features = data.pop("entry_features_json", None)
+        data["entry_features"] = json.loads(raw_features) if raw_features else {}
         return data
 
     def update_trade_mark(self, trade_id: int, price: float, error: str | None = None) -> dict[str, Any] | None:
@@ -335,6 +370,10 @@ class MemeScoutStore:
         now = time.time()
         status = "closed" if close_if_empty and new_remaining_qty <= max(float(trade["quantity"]) * 1e-9, 1e-12) else "open"
         closed_at = now if status == "closed" else trade.get("closed_at")
+        final_result = None
+        if status == "closed":
+            final_result = "win" if realized_total > 0.01 else ("loss" if realized_total < -0.01 else "breakeven")
+        time_in_trade = max(0.0, now - float(trade.get("opened_at") or now))
         with self.connect() as db:
             db.execute(
                 """INSERT INTO paper_trade_exits(trade_id, created_at, reason, price, quantity, proceeds_usdc, realized_pnl)
@@ -353,8 +392,8 @@ class MemeScoutStore:
             db.execute(
                 f"""UPDATE paper_trades SET status=?, closed_at=?, exit_price=?, current_price=?,
                 remaining_quantity=?, remaining_size_usdc=?, realized_pnl=?, unrealized_pnl=?,
-                last_monitor_update_at=?{flag_sql} WHERE id=?""",
-                (status, closed_at, price, price, new_remaining_qty, new_remaining_size, realized_total, unrealized, now, trade_id),
+                last_monitor_update_at=?, exit_reason=?, exit_rule_triggered=?, final_result=COALESCE(?, final_result), time_in_trade=?{flag_sql} WHERE id=?""",
+                (status, closed_at, price, price, new_remaining_qty, new_remaining_size, realized_total, unrealized, now, reason, reason, final_result, time_in_trade, trade_id),
             )
             row = db.execute("SELECT value FROM state WHERE key='paper_balance_usdc'").fetchone()
             balance = float(row["value"] if row else "100") + proceeds
@@ -379,6 +418,14 @@ class MemeScoutStore:
         with self.connect() as db:
             rows = db.execute("SELECT * FROM signals ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
+
+    def trades_by_entry_mode(self, entry_mode: str | None = None) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            if entry_mode:
+                rows = db.execute("SELECT * FROM paper_trades WHERE entry_mode=? ORDER BY id", (entry_mode,)).fetchall()
+            else:
+                rows = db.execute("SELECT * FROM paper_trades ORDER BY id").fetchall()
+        return [self._trade_from_row(row) for row in rows]
 
     def stats(self) -> dict[str, Any]:
         with self.connect() as db:

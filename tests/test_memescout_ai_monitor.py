@@ -1,4 +1,5 @@
 import asyncio
+import time
 import sys
 import types
 from pathlib import Path
@@ -239,3 +240,71 @@ def test_monitor_no_real_trading_method_is_referenced():
     combined = "\n".join(p.read_text() for root in roots for p in ([root] if root.is_file() else root.glob("*.py"))).lower()
     for token in forbidden:
         assert token.lower() not in combined
+
+
+
+def pair_with_features(price=1.0, liquidity=100_000, buys=60, sells=10, pc5=20, pair="PairM"):
+    return {
+        "pairAddress": pair,
+        "baseToken": {"symbol": "MON", "address": "MintM"},
+        "priceUsd": str(price),
+        "liquidity": {"usd": liquidity},
+        "txns": {"m5": {"buys": buys, "sells": sells}},
+        "priceChange": {"m5": pc5, "h1": 10},
+    }
+
+
+def test_auto_exit_by_max_hold_time(store, monkeypatch):
+    monkeypatch.setenv("MEMESCOUT_MAX_HOLD_MINUTES", "1")
+    add_open_trade(store)
+    with store.connect() as db:
+        db.execute("UPDATE paper_trades SET opened_at=? WHERE id=1", (time.time() - 3600,))
+    async def fake_fetch(pair_address):
+        return pair_with_features(price=1.01)
+    with patch("condor.memescout_ai.monitor.fetch_pair_by_address", fake_fetch):
+        asyncio.run(monitor_once(store))
+    trade = store.get_trade(1)
+    assert trade["status"] == "closed"
+    assert trade["exit_reason"] == "max_hold_time"
+
+
+def test_auto_exit_by_momentum_decay(store):
+    add_open_trade(store)
+    async def fake_fetch(pair_address):
+        return pair_with_features(price=0.95, buys=5, sells=12, pc5=-5)
+    with patch("condor.memescout_ai.monitor.fetch_pair_by_address", fake_fetch):
+        asyncio.run(monitor_once(store))
+    assert store.get_trade(1)["exit_reason"] == "momentum_decay"
+
+
+def test_auto_exit_by_liquidity_drop(store, monkeypatch):
+    monkeypatch.setenv("MEMESCOUT_LIQUIDITY_DROP_EXIT_PCT", "35")
+    add_open_trade(store)
+    async def fake_fetch(pair_address):
+        return pair_with_features(price=0.98, liquidity=50_000)
+    with patch("condor.memescout_ai.monitor.fetch_pair_by_address", fake_fetch):
+        asyncio.run(monitor_once(store))
+    assert store.get_trade(1)["exit_reason"] == "liquidity_drop"
+
+
+def test_auto_exit_by_sell_pressure(store, monkeypatch):
+    monkeypatch.setenv("MEMESCOUT_SELL_PRESSURE_RATIO_EXIT", "1.4")
+    add_open_trade(store)
+    async def fake_fetch(pair_address):
+        return pair_with_features(price=0.98, buys=10, sells=20, pc5=1)
+    with patch("condor.memescout_ai.monitor.fetch_pair_by_address", fake_fetch):
+        asyncio.run(monitor_once(store))
+    assert store.get_trade(1)["exit_reason"] == "sell_pressure"
+
+
+def test_stale_price_mark_stale_behavior(store, monkeypatch):
+    monkeypatch.setenv("MEMESCOUT_STALE_PRICE_EXIT_MINUTES", "0")
+    monkeypatch.setenv("MEMESCOUT_STALE_PRICE_ACTION", "mark_stale")
+    add_open_trade(store)
+    async def fail_fetch(pair_address):
+        raise RuntimeError("stale")
+    with patch("condor.memescout_ai.monitor.fetch_pair_by_address", fail_fetch):
+        asyncio.run(monitor_once(store))
+    trade = store.get_trade(1)
+    assert trade["status"] == "open"
+    assert "stale" in (trade.get("monitor_error") or "")

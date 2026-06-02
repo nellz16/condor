@@ -101,6 +101,10 @@ Do not treat Koyeb Free SQLite as durable long-term storage. Postgres support is
 - `/memescout_strategies` — list paper-only strategy modules and enabled/disabled state.
 - `/memescout_strategy_enable <strategy_id>` / `/memescout_strategy_disable <strategy_id>` — control one scanner strategy.
 - `/memescout_strategy_status <strategy_id>` — inspect one scanner strategy.
+- `/memescout_mode` — show entry/exit mode.
+- `/memescout_set_entry_mode <manual_approval|auto_paper|observe_only>` — choose manual, fully automatic paper, or watchlist mode.
+- `/memescout_set_exit_mode <auto|manual_only>` — choose deterministic monitor exits or manual-only force close.
+- `/memescout_auto_status` / `/memescout_auto_report` — inspect auto-paper experiment results.
 
 For 24/7 operation on Koyeb, set `MEMESCOUT_AUTOSTART_SCANNER=true` and `MEMESCOUT_AUTOSTART_MONITOR=true`. Autostart is duplicate-safe inside the running process.
 
