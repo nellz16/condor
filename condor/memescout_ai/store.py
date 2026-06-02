@@ -45,6 +45,7 @@ class MemeScoutStore:
                     token_symbol TEXT NOT NULL,
                     token_mint TEXT NOT NULL,
                     pair_address TEXT NOT NULL,
+                    strategy_id TEXT NOT NULL DEFAULT 'momentum_continuation',
                     score REAL NOT NULL,
                     eligible INTEGER NOT NULL,
                     status TEXT NOT NULL,
@@ -58,6 +59,7 @@ class MemeScoutStore:
                     token_symbol TEXT NOT NULL,
                     token_mint TEXT NOT NULL,
                     pair_address TEXT NOT NULL,
+                    strategy_id TEXT NOT NULL DEFAULT 'momentum_continuation',
                     opened_at REAL NOT NULL,
                     closed_at REAL,
                     status TEXT NOT NULL,
@@ -115,8 +117,12 @@ class MemeScoutStore:
 
 
     def _migrate(self, db: sqlite3.Connection) -> None:
+        signal_cols = {row["name"] for row in db.execute("PRAGMA table_info(signals)")}
+        if "strategy_id" not in signal_cols:
+            db.execute("ALTER TABLE signals ADD COLUMN strategy_id TEXT NOT NULL DEFAULT 'momentum_continuation'")
         cols = {row["name"] for row in db.execute("PRAGMA table_info(paper_trades)")}
         migrations = {
+            "strategy_id": "ALTER TABLE paper_trades ADD COLUMN strategy_id TEXT NOT NULL DEFAULT 'momentum_continuation'",
             "remaining_quantity": "ALTER TABLE paper_trades ADD COLUMN remaining_quantity REAL NOT NULL DEFAULT 0",
             "remaining_size_usdc": "ALTER TABLE paper_trades ADD COLUMN remaining_size_usdc REAL NOT NULL DEFAULT 0",
             "current_price": "ALTER TABLE paper_trades ADD COLUMN current_price REAL",
@@ -191,24 +197,40 @@ class MemeScoutStore:
             row = db.execute("SELECT COUNT(*) AS c FROM signals WHERE created_at >= ?", (cutoff,)).fetchone()
         return int(row["c"])
 
-    def has_recent_signal(self, token_mint: str, pair_address: str, seconds: int = 3600) -> bool:
+    def has_recent_signal(self, token_mint: str, pair_address: str, seconds: int = 3600, strategy_id: str | None = None) -> bool:
         cutoff = time.time() - seconds
         with self.connect() as db:
-            row = db.execute(
-                """SELECT COUNT(*) AS c FROM signals
-                WHERE created_at >= ? AND (token_mint=? OR pair_address=?)""",
-                (cutoff, token_mint, pair_address),
-            ).fetchone()
+            if strategy_id:
+                row = db.execute(
+                    """SELECT COUNT(*) AS c FROM signals
+                    WHERE created_at >= ? AND strategy_id=? AND (token_mint=? OR pair_address=?)""",
+                    (cutoff, strategy_id, token_mint, pair_address),
+                ).fetchone()
+            else:
+                row = db.execute(
+                    """SELECT COUNT(*) AS c FROM signals
+                    WHERE created_at >= ? AND (token_mint=? OR pair_address=?)""",
+                    (cutoff, token_mint, pair_address),
+                ).fetchone()
         return int(row["c"]) > 0
+
+    def seen_strategies(self, token_mint: str, pair_address: str) -> list[str]:
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT DISTINCT strategy_id FROM signals
+                WHERE token_mint=? OR pair_address=? ORDER BY strategy_id""",
+                (token_mint, pair_address),
+            ).fetchall()
+        return [str(row["strategy_id"]) for row in rows]
 
     def add_signal(self, signal: dict[str, Any]) -> int:
         with self.connect() as db:
             cur = db.execute(
-                """INSERT INTO signals(created_at, token_symbol, token_mint, pair_address, score,
-                eligible, status, reject_reason, features_json, explanation) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                """INSERT INTO signals(created_at, token_symbol, token_mint, pair_address, strategy_id, score,
+                eligible, status, reject_reason, features_json, explanation) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     time.time(), signal["token_symbol"], signal["token_mint"], signal["pair_address"],
-                    signal["score"], int(signal["eligible"]), signal.get("status", "pending"),
+                    signal.get("strategy_id", "momentum_continuation"), signal["score"], int(signal["eligible"]), signal.get("status", "pending"),
                     signal.get("reject_reason"), json.dumps(signal["features"], sort_keys=True), signal["explanation"],
                 ),
             )
@@ -230,10 +252,11 @@ class MemeScoutStore:
     def add_paper_trade(self, signal: dict[str, Any], entry_price: float, size_usdc: float, quantity: float, plan: dict[str, Any]) -> int:
         with self.connect() as db:
             cur = db.execute(
-                """INSERT INTO paper_trades(signal_id, token_symbol, token_mint, pair_address, opened_at,
+                """INSERT INTO paper_trades(signal_id, token_symbol, token_mint, pair_address, strategy_id, opened_at,
                 status, entry_price, size_usdc, quantity, remaining_quantity, remaining_size_usdc,
-                current_price, highest_price, lowest_price, plan_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (signal["id"], signal["token_symbol"], signal["token_mint"], signal["pair_address"], time.time(),
+                current_price, highest_price, lowest_price, plan_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (signal["id"], signal["token_symbol"], signal["token_mint"], signal["pair_address"],
+                 signal.get("strategy_id", "momentum_continuation"), time.time(),
                  "open", entry_price, size_usdc, quantity, quantity, size_usdc, entry_price, entry_price, entry_price,
                  json.dumps(plan, sort_keys=True)),
             )

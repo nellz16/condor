@@ -154,3 +154,25 @@ Manual Telegram checklist:
 ## Safety audit notes
 
 MemeScout code is intentionally isolated from Condor real execution paths. The MemeScout package and handlers do not import `/trade`, `/swap`, Gateway execution modules, Hummingbot Backend API order clients, wallet private-key loaders, or transaction-signing helpers. Approval calls `approve_paper_buy`, which writes a row to SQLite only. Rejection updates signal status only.
+
+## Strategy IDs
+
+MemeScout classifies paper-only candidates by deterministic strategy before any optional LLM explanation:
+
+- `fresh_launch`
+- `momentum_continuation`
+- `pullback_reentry`
+- `liquidity_expansion`
+- `boost_anomaly`
+- `rug_defense_only`
+
+Duplicates are suppressed per strategy. A token previously seen as `momentum_continuation` can later be considered as `pullback_reentry` if the deterministic rules match that setup. `rug_defense_only` never sends approval signals; it stores risk/rejection information for learning.
+
+Admin strategy controls:
+
+```text
+/memescout_strategies
+/memescout_strategy_enable <strategy_id>
+/memescout_strategy_disable <strategy_id>
+/memescout_strategy_status <strategy_id>
+```

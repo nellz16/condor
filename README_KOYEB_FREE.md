@@ -30,6 +30,7 @@ MEMESCOUT_PAPER_BALANCE_USDC=100
 MEMESCOUT_MAX_SIGNALS_PER_HOUR=6
 MEMESCOUT_MAX_CANDIDATES_STORED_PER_HOUR=100
 MEMESCOUT_MAX_DEX_REQUESTS_PER_MINUTE=50
+MEMESCOUT_ENABLE_DEX_SEARCH=false
 MEMESCOUT_DUPLICATE_SIGNAL_WINDOW_SECONDS=3600
 MEMESCOUT_DEX_REQUEST_MIN_INTERVAL_SECONDS=1.05
 MEMESCOUT_LLM_MAX_CALLS_PER_HOUR=20
@@ -97,10 +98,13 @@ Do not treat Koyeb Free SQLite as durable long-term storage. Postgres support is
 - `/memescout_loop_status` — show loop state, last scan/monitor timestamps, errors, and ETA.
 - `/memescout_debug_last_scan` — show last scan summary and top filtered candidates.
 - `/memescout_reset_hourly_limits` — reset only MemeScout hourly counters; does not delete signals or trades.
+- `/memescout_strategies` — list paper-only strategy modules and enabled/disabled state.
+- `/memescout_strategy_enable <strategy_id>` / `/memescout_strategy_disable <strategy_id>` — control one scanner strategy.
+- `/memescout_strategy_status <strategy_id>` — inspect one scanner strategy.
 
 For 24/7 operation on Koyeb, set `MEMESCOUT_AUTOSTART_SCANNER=true` and `MEMESCOUT_AUTOSTART_MONITOR=true`. Autostart is duplicate-safe inside the running process.
 
-`Scan now` may store candidates but send `0` Telegram signals when all candidates are rejected by filters, duplicate suppression, or the Telegram-signal quota. Rejected/stored-only candidates do not consume `MEMESCOUT_MAX_SIGNALS_PER_HOUR`; separate candidate-storage and DEX-request limits are shown in `/memescout_status` and `/memescout_debug_last_scan`. Use `/memescout_debug_last_scan` to see why.
+`Scan now` may store candidates but send `0` Telegram signals when all candidates are rejected by filters, duplicate suppression, or the Telegram-signal quota. Rejected/stored-only candidates do not consume `MEMESCOUT_MAX_SIGNALS_PER_HOUR`; separate candidate-storage, strategy, and DEX-request limits are shown in `/memescout_status` and `/memescout_debug_last_scan`. Use `/memescout_debug_last_scan` to see why.
 
 ## Telegram smoke test
 

@@ -32,18 +32,41 @@ class DexScreenerClient:
         self._last_request_at = 0.0
 
     async def latest_solana_pairs(self, limit: int = 20) -> list[dict[str, Any]]:
+        pairs_by_source = await self.latest_solana_pairs_by_source(limit)
+        pairs: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for source_pairs in pairs_by_source.values():
+            for pair in source_pairs:
+                key = str(pair.get("pairAddress") or pair.get("url") or id(pair))
+                if key in seen:
+                    continue
+                seen.add(key)
+                pairs.append(pair)
+        return sorted(pairs, key=lambda p: safe_float((p.get("volume") or {}).get("h1")), reverse=True)[:limit]
+
+    async def latest_solana_pairs_by_source(self, limit: int = 20) -> dict[str, list[dict[str, Any]]]:
         import aiohttp
 
         async with aiohttp.ClientSession() as session:
-            token_addresses = await self._latest_solana_token_addresses(session, limit * 2)
-            pairs: list[dict[str, Any]] = []
-            for token in token_addresses[:limit]:
-                data = await self._request_json(session, f"{BASE}/token-pairs/v1/solana/{token}")
-                if isinstance(data, list):
-                    pairs.extend([p for p in data if p.get("chainId") == "solana"])
-            if not pairs:
-                pairs = await self._search_solana_pairs(session, "solana meme", limit)
-        return sorted(pairs, key=lambda p: safe_float((p.get("volume") or {}).get("h1")), reverse=True)[:limit]
+            profiles = await self._latest_solana_token_addresses(session, limit)
+            boosted_latest = await self._boosted_solana_token_addresses(session, "latest", limit)
+            boosted_top = await self._boosted_solana_token_addresses(session, "top", limit)
+            results = {
+                "latest_token_profiles": await self._pairs_for_tokens(session, profiles[: max(1, limit // 2)]),
+                "latest_boosted_tokens": await self._pairs_for_tokens(session, boosted_latest[: max(1, limit // 3)]),
+                "top_boosted_tokens": await self._pairs_for_tokens(session, boosted_top[: max(1, limit // 3)]),
+            }
+            if get_settings().enable_dex_search:
+                results["pair_search"] = await self._search_solana_pairs(session, "solana meme", limit)
+        return results
+
+    async def _pairs_for_tokens(self, session: Any, token_addresses: list[str]) -> list[dict[str, Any]]:
+        pairs: list[dict[str, Any]] = []
+        for token in token_addresses:
+            data = await self._request_json(session, f"{BASE}/token-pairs/v1/solana/{token}")
+            if isinstance(data, list):
+                pairs.extend([p for p in data if p.get("chainId") == "solana"])
+        return pairs
 
     async def _request_json(self, session: Any, url: str, **kwargs: Any) -> Any:
         elapsed = time.monotonic() - self._last_request_at
@@ -121,6 +144,10 @@ def pair_to_features(pair: dict[str, Any]) -> dict[str, Any]:
         "slippage_estimate_bps": estimate_slippage_bps(liquidity_usd),
         "price_usd": price_usd,
         "dex_url": str(pair.get("url") or ""),
+        "source_id": str(pair.get("source_id") or pair.get("source") or "unknown"),
+        "boosted": bool(pair.get("boosts") or pair.get("boosted") or pair.get("boostAmount") or pair.get("boostTotalAmount")),
+        "boost_amount": safe_float(pair.get("boostAmount") or (pair.get("boosts") or {}).get("active")),
+        "boost_total_amount": safe_float(pair.get("boostTotalAmount") or (pair.get("boosts") or {}).get("total")),
     }
 
 

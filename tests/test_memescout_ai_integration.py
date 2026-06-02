@@ -54,9 +54,9 @@ import pytest
 
 from condor.memescout_ai.dexscreener import DexScreenerClient
 from condor.memescout_ai.paper import approve_paper_buy, reject_signal, simulate_paper_sell
-from condor.memescout_ai.scoring import score_signal
+from condor.memescout_ai.scoring import score_signal, score_strategy_signal
 from condor.memescout_ai.store import MemeScoutStore
-from handlers.memescout_ai import _pnl_text, _status_text, memescout_callback_handler, memescout_reset_hourly_limits_command
+from handlers.memescout_ai import _pnl_text, _status_text, memescout_callback_handler, memescout_reset_hourly_limits_command, memescout_strategies_command, memescout_strategy_disable_command, memescout_strategy_enable_command
 from routines.memescout_ai import Config, scan_once, scan_once_summary
 
 
@@ -411,3 +411,81 @@ def test_memescout_reset_hourly_limits_resets_counters_only(store, monkeypatch):
     assert store.counter_value("candidates_stored", 3600) == 0
     assert store.counter_value("telegram_signals_sent", 3600) == 0
     assert "trades and signals were not deleted" in update.message.replies[-1][0]
+
+
+
+def test_duplicate_suppression_is_per_strategy(store):
+    signal_id = add_signal(store)
+    with store.connect() as db:
+        db.execute("UPDATE signals SET strategy_id='momentum_continuation' WHERE id=?", (signal_id,))
+    assert store.has_recent_signal("Mint111", "Pair111", 3600, strategy_id="momentum_continuation") is True
+    assert store.has_recent_signal("Mint111", "Pair111", 3600, strategy_id="pullback_reentry") is False
+
+
+def test_same_token_suppressed_for_one_strategy_but_eligible_for_another(store):
+    signal_id = add_signal(store)
+    with store.connect() as db:
+        db.execute("UPDATE signals SET strategy_id='momentum_continuation' WHERE id=?", (signal_id,))
+    features = store.get_signal(signal_id)["features"]
+    features.update({"price_change_1h": 60, "price_change_5m": 2, "buys_5m": 30, "sells_5m": 8, "volume_5m": 12_000})
+    verdict = score_strategy_signal(features, "pullback_reentry", store.weights())
+    assert store.has_recent_signal("Mint111", "Pair111", 3600, strategy_id="momentum_continuation") is True
+    assert store.has_recent_signal("Mint111", "Pair111", 3600, strategy_id="pullback_reentry") is False
+    assert verdict["eligible"] is True
+
+
+def test_boost_alone_cannot_create_eligible_signal(store):
+    features = add_signal_features = store.get_signal(add_signal(store))["features"]
+    features.update({"boosted": True, "boost_amount": 100, "volume_5m": 0, "volume_1h": 0, "buys_5m": 1, "sells_5m": 0})
+    verdict = score_strategy_signal(features, "boost_anomaly", store.weights())
+    assert verdict["eligible"] is False
+    assert "weak organic volume" in (verdict["reject_reason"] or "") or "recent volume" in (verdict["reject_reason"] or "")
+
+
+def test_extreme_pump_with_weakening_buy_sell_is_penalized(store):
+    features = store.get_signal(add_signal(store))["features"]
+    features.update({"price_change_1h": 250, "price_change_5m": 20, "buys_5m": 20, "sells_5m": 18, "volume_5m": 30_000})
+    verdict = score_strategy_signal(features, "momentum_continuation", store.weights())
+    assert verdict["eligible"] is False
+    assert "extreme 1h pump" in (verdict["reject_reason"] or "")
+
+
+def test_pullback_reentry_requires_renewed_buy_pressure(store):
+    features = store.get_signal(add_signal(store))["features"]
+    features.update({"price_change_1h": 50, "price_change_5m": 1, "buys_5m": 5, "sells_5m": 10, "volume_5m": 10_000})
+    verdict = score_strategy_signal(features, "pullback_reentry", store.weights())
+    assert verdict["eligible"] is False
+    assert "renewed buy pressure" in (verdict["reject_reason"] or "")
+
+
+def test_rug_defense_only_never_sends_telegram_approval(store):
+    context = FakeContext()
+    risky = unique_bad_pair("RISK", "RiskMint", "RiskPair")
+    with patch("routines.memescout_ai.candidate_strategies", lambda features: ["rug_defense_only"]), patch("routines.memescout_ai.DexScreenerClient") as client_cls:
+        client_cls.return_value.latest_solana_pairs = AsyncMock(return_value=[risky])
+        summary = asyncio.run(scan_once_summary(Config(max_pairs_per_scan=1, send_rejected=True), context, store, context._chat_id))
+    assert summary.candidates_by_strategy.get("rug_defense_only") == 1
+    assert summary.telegram_signals_sent == 0
+    assert len(context.bot.sent) == 0
+
+
+def test_status_shows_strategy_breakdowns(store):
+    store.set_state("last_scan_summary", '{"candidates_by_strategy":{"fresh_launch":1},"eligible_by_strategy":{"fresh_launch":1},"rejected_by_strategy":{"rug_defense_only":1},"duplicate_suppressed_by_strategy":{"fresh_launch":2}}')
+    text = _status_text(store)
+    assert "candidates_by_strategy: fresh_launch=1" in text
+    assert "eligible_by_strategy: fresh_launch=1" in text
+    assert "rejected_by_strategy: rug_defense_only=1" in text
+    assert "duplicate_suppressed_by_strategy: fresh_launch=2" in text
+
+
+def test_strategy_enable_disable_commands_work(store, monkeypatch):
+    monkeypatch.setenv("MEMESCOUT_DB_PATH", str(store.path))
+    update = SimpleNamespace(message=FakeMessage(), effective_user=SimpleNamespace(id=1, username="admin"))
+    disable_context = SimpleNamespace(args=["pullback_reentry"], bot=FakeBot(), user_data={})
+    enable_context = SimpleNamespace(args=["pullback_reentry"], bot=FakeBot(), user_data={})
+    asyncio.run(memescout_strategy_disable_command.__wrapped__(update, disable_context))
+    assert store.get_state("strategy:pullback_reentry:enabled") == "false"
+    asyncio.run(memescout_strategy_enable_command.__wrapped__(update, enable_context))
+    assert store.get_state("strategy:pullback_reentry:enabled") == "true"
+    asyncio.run(memescout_strategies_command.__wrapped__(update, enable_context))
+    assert "pullback_reentry" in update.message.replies[-1][0]

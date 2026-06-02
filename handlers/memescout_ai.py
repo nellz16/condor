@@ -18,7 +18,8 @@ from condor.memescout_ai.loops import (
 from condor.memescout_ai.paper import approve_paper_buy, reject_signal, simulate_paper_sell
 from condor.memescout_ai.settings import get_settings
 from condor.memescout_ai.store import MemeScoutStore
-from routines.memescout_ai import Config, ScanSummary, scan_once_summary
+from condor.memescout_ai.scoring import SUPPORTED_STRATEGIES
+from routines.memescout_ai import Config, ScanSummary, scan_once_summary, set_strategy_enabled, strategy_status
 from utils.auth import admin_required, restricted
 
 
@@ -130,6 +131,39 @@ async def memescout_reset_hourly_limits_command(update: Update, context: Context
     await update.message.reply_text(f"✅ MemeScout hourly counters reset ({removed} counter row(s)); trades and signals were not deleted.")
 
 
+@admin_required
+async def memescout_strategies_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(_strategies_text())
+
+
+@admin_required
+async def memescout_strategy_enable_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    strategy_id = _first_text_arg(context)
+    if not strategy_id or not set_strategy_enabled(MemeScoutStore(), strategy_id, True):
+        await update.message.reply_text("Usage: /memescout_strategy_enable <strategy_id>")
+        return
+    await update.message.reply_text(f"✅ MemeScout strategy enabled: {strategy_id}")
+
+
+@admin_required
+async def memescout_strategy_disable_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    strategy_id = _first_text_arg(context)
+    if not strategy_id or not set_strategy_enabled(MemeScoutStore(), strategy_id, False):
+        await update.message.reply_text("Usage: /memescout_strategy_disable <strategy_id>")
+        return
+    await update.message.reply_text(f"⏸ MemeScout strategy disabled: {strategy_id}")
+
+
+@admin_required
+async def memescout_strategy_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    strategy_id = _first_text_arg(context)
+    status = strategy_status(MemeScoutStore(), strategy_id or "")
+    if not status:
+        await update.message.reply_text("Usage: /memescout_strategy_status <strategy_id>")
+        return
+    await update.message.reply_text(f"{status['strategy_id']}: enabled={status['enabled']}")
+
+
 @restricted
 async def memescout_daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(_daily_text())
@@ -227,6 +261,11 @@ def _status_text(store: MemeScoutStore | None = None) -> str:
         f"telegram_signals_sent_this_hour: {summary.telegram_signals_sent_this_hour}\n"
         f"candidate_storage_quota_remaining: {summary.candidate_storage_quota_remaining}\n"
         f"telegram_signal_quota_remaining: {summary.telegram_signal_quota_remaining}\n"
+        f"pairs_fetched_by_source: {_fmt_dict(summary.pairs_fetched_by_source)}\n"
+        f"candidates_by_strategy: {_fmt_dict(summary.candidates_by_strategy)}\n"
+        f"eligible_by_strategy: {_fmt_dict(summary.eligible_by_strategy)}\n"
+        f"rejected_by_strategy: {_fmt_dict(summary.rejected_by_strategy)}\n"
+        f"duplicate_suppressed_by_strategy: {_fmt_dict(summary.duplicate_suppressed_by_strategy)}\n"
         f"emergency_stop: {store.bool_state('emergency_stop')}\n"
         f"paused: {store.bool_state('paused')}"
     )
@@ -267,6 +306,12 @@ def _scan_summary_text(summary: ScanSummary) -> str:
         f"telegram_signals_sent_this_hour: {summary.telegram_signals_sent_this_hour}\n"
         f"candidate_storage_quota_remaining: {summary.candidate_storage_quota_remaining}\n"
         f"telegram_signal_quota_remaining: {summary.telegram_signal_quota_remaining}\n"
+        f"pairs_fetched_by_source: {_fmt_dict(summary.pairs_fetched_by_source)}\n"
+        f"candidates_by_strategy: {_fmt_dict(summary.candidates_by_strategy)}\n"
+        f"eligible_by_strategy: {_fmt_dict(summary.eligible_by_strategy)}\n"
+        f"rejected_by_strategy: {_fmt_dict(summary.rejected_by_strategy)}\n"
+        f"duplicate_suppressed_by_strategy: {_fmt_dict(summary.duplicate_suppressed_by_strategy)}\n"
+        f"top_rejection_reasons: {_fmt_dict(summary.top_rejection_reasons)}\n"
         "filtered_by_reason:\n"
         f"  low_liquidity: {filters.get('low_liquidity', 0)}\n"
         f"  low_score: {filters.get('low_score', 0)}\n"
@@ -304,9 +349,18 @@ def _debug_last_scan_text(store: MemeScoutStore | None = None) -> str:
         lines.append("none")
     for item in summary.top_filtered[:5]:
         lines.append(
-            f"- {item.get('token_symbol')} pair={item.get('pair_address')} score={item.get('score')} "
+            f"- {item.get('token_symbol')} strategy={item.get('strategy_id')} pair={item.get('pair_address')} score={item.get('score')} "
             f"rug={item.get('rug_risk')} reason={item.get('main_rejection_reason')} "
             f"liq={item.get('liquidity')} vol={item.get('volume')} age={item.get('age')}"
+        )
+    lines.append("")
+    lines.append("Top 5 close to eligibility:")
+    if not summary.close_to_eligibility:
+        lines.append("none")
+    for item in summary.close_to_eligibility[:5]:
+        lines.append(
+            f"- {item.get('token_symbol')} strategy={item.get('strategy_id')} pair={item.get('pair_address')} "
+            f"score={item.get('score')} rug={item.get('rug_risk')} reason={item.get('main_rejection_reason')}"
         )
     return "\n".join(lines)
 
@@ -360,6 +414,27 @@ def _signals_text(store: MemeScoutStore | None = None, limit: int = 10) -> str:
     for row in rows:
         lines.append(f"#{row['id']} {row['token_symbol']} score={row['score']} status={row['status']}")
     return "\n".join(lines)
+
+
+
+def _fmt_dict(values: dict | None) -> str:
+    if not values:
+        return "none"
+    return ", ".join(f"{k}={v}" for k, v in sorted(values.items()))
+
+
+def _strategies_text(store: MemeScoutStore | None = None) -> str:
+    store = store or MemeScoutStore()
+    lines = ["🧭 MemeScout Strategies"]
+    for strategy_id in SUPPORTED_STRATEGIES:
+        status = strategy_status(store, strategy_id)
+        lines.append(f"- {strategy_id}: enabled={status['enabled'] if status else False}")
+    return "\n".join(lines)
+
+
+def _first_text_arg(context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    args = getattr(context, "args", None) or []
+    return str(args[0]).strip() if args else None
 
 
 def _first_int_arg(context: ContextTypes.DEFAULT_TYPE) -> int | None:
