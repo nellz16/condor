@@ -156,6 +156,25 @@ class MemeScoutStore:
     def bool_state(self, key: str) -> bool:
         return self.get_state(key, "false").lower() == "true"
 
+    def counter_value(self, name: str, period_seconds: int = 3600) -> int:
+        bucket = int(time.time() // period_seconds)
+        return int(self.get_state(f"counter:{name}:{period_seconds}:{bucket}", "0") or 0)
+
+    def increment_counter(self, name: str, amount: int = 1, period_seconds: int = 3600) -> int:
+        bucket = int(time.time() // period_seconds)
+        key = f"counter:{name}:{period_seconds}:{bucket}"
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM state WHERE key=?", (key,)).fetchone()
+            value = int(row["value"]) if row else 0
+            value += amount
+            db.execute("INSERT OR REPLACE INTO state(key, value) VALUES(?, ?)", (key, str(value)))
+        return value
+
+    def reset_hourly_counters(self) -> int:
+        with self.connect() as db:
+            cur = db.execute("DELETE FROM state WHERE key LIKE 'counter:%:3600:%'")
+            return int(cur.rowcount or 0)
+
     def weights(self) -> dict[str, float]:
         with self.connect() as db:
             return {row["key"]: float(row["value"]) for row in db.execute("SELECT key, value FROM weights")}

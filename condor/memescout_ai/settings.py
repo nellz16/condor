@@ -33,6 +33,8 @@ class MemeScoutSettings:
     paper_only: bool = field(default_factory=lambda: os.environ.get("MEMESCOUT_PAPER_ONLY", "true").lower() != "false")
     default_balance_usdc: float = field(default_factory=lambda: _env_float("MEMESCOUT_PAPER_BALANCE_USDC", 100.0))
     max_signals_per_hour: int = field(default_factory=lambda: _env_int("MEMESCOUT_MAX_SIGNALS_PER_HOUR", 6))
+    max_candidates_stored_per_hour: int = field(default_factory=lambda: _env_int("MEMESCOUT_MAX_CANDIDATES_STORED_PER_HOUR", 100))
+    max_dex_requests_per_minute: int = field(default_factory=lambda: _env_int("MEMESCOUT_MAX_DEX_REQUESTS_PER_MINUTE", 50))
     duplicate_signal_window_seconds: int = field(default_factory=lambda: _env_int("MEMESCOUT_DUPLICATE_SIGNAL_WINDOW_SECONDS", 3600))
     llm_max_calls_per_hour: int = field(default_factory=lambda: _env_int("MEMESCOUT_LLM_MAX_CALLS_PER_HOUR", 20))
     dex_request_min_interval_seconds: float = field(default_factory=lambda: _env_float("MEMESCOUT_DEX_REQUEST_MIN_INTERVAL_SECONDS", 1.05))

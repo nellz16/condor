@@ -16,6 +16,7 @@ from condor.memescout_ai.loops import (
     stop_scanner_loop,
 )
 from condor.memescout_ai.paper import approve_paper_buy, reject_signal, simulate_paper_sell
+from condor.memescout_ai.settings import get_settings
 from condor.memescout_ai.store import MemeScoutStore
 from routines.memescout_ai import Config, ScanSummary, scan_once_summary
 from utils.auth import admin_required, restricted
@@ -123,6 +124,12 @@ async def memescout_debug_last_scan_command(update: Update, context: ContextType
     await update.message.reply_text(_debug_last_scan_text())
 
 
+@admin_required
+async def memescout_reset_hourly_limits_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    removed = MemeScoutStore().reset_hourly_counters()
+    await update.message.reply_text(f"✅ MemeScout hourly counters reset ({removed} counter row(s)); trades and signals were not deleted.")
+
+
 @restricted
 async def memescout_daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(_daily_text())
@@ -191,11 +198,15 @@ def _status_text(store: MemeScoutStore | None = None) -> str:
     stats = store.stats()
     status = loop_status(store)
     summary = ScanSummary.from_json(store.get_state("last_scan_summary", ""))
+    _hydrate_quota_fields(summary, store)
     last_summary = (
         f"pairs={summary.pairs_fetched}, seen={summary.candidates_seen}, "
         f"stored={summary.candidates_stored}, eligible={summary.eligible_count}, "
         f"sent={summary.telegram_signals_sent}, dupes={summary.duplicate_suppressed}, "
-        f"rate_limited={summary.rate_limited}, error={summary.scanner_error or 'none'}"
+        f"dex_limited={summary.dex_request_rate_limited}, "
+        f"storage_limited={summary.candidate_storage_rate_limited}, "
+        f"telegram_limited={summary.telegram_signal_rate_limited}, "
+        f"error={summary.scanner_error or 'none'}"
     )
     return (
         "🧭 MemeScout AI Status\n"
@@ -211,9 +222,25 @@ def _status_text(store: MemeScoutStore | None = None) -> str:
         f"monitor_loop_running: {status['monitor_loop_running']}\n"
         f"last_scan_at: {status['last_scan_at']}\n"
         f"last_scan_summary: {last_summary}\n"
+        f"candidates_seen_this_hour: {summary.candidates_seen_this_hour}\n"
+        f"candidates_stored_this_hour: {summary.candidates_stored_this_hour}\n"
+        f"telegram_signals_sent_this_hour: {summary.telegram_signals_sent_this_hour}\n"
+        f"candidate_storage_quota_remaining: {summary.candidate_storage_quota_remaining}\n"
+        f"telegram_signal_quota_remaining: {summary.telegram_signal_quota_remaining}\n"
         f"emergency_stop: {store.bool_state('emergency_stop')}\n"
         f"paused: {store.bool_state('paused')}"
     )
+
+
+
+
+def _hydrate_quota_fields(summary: ScanSummary, store: MemeScoutStore) -> None:
+    settings = get_settings()
+    summary.candidates_seen_this_hour = store.counter_value("candidates_seen", 3600)
+    summary.candidates_stored_this_hour = store.counter_value("candidates_stored", 3600)
+    summary.telegram_signals_sent_this_hour = store.counter_value("telegram_signals_sent", 3600)
+    summary.candidate_storage_quota_remaining = max(0, settings.max_candidates_stored_per_hour - summary.candidates_stored_this_hour)
+    summary.telegram_signal_quota_remaining = max(0, settings.max_signals_per_hour - summary.telegram_signals_sent_this_hour)
 
 
 def _eligible_signal_count(store: MemeScoutStore) -> int:
@@ -232,7 +259,14 @@ def _scan_summary_text(summary: ScanSummary) -> str:
         f"eligible_count: {summary.eligible_count}\n"
         f"telegram_signals_sent: {summary.telegram_signals_sent}\n"
         f"duplicate_suppressed: {summary.duplicate_suppressed}\n"
-        f"rate_limited: {summary.rate_limited}\n"
+        f"dex_request_rate_limited: {summary.dex_request_rate_limited}\n"
+        f"candidate_storage_rate_limited: {summary.candidate_storage_rate_limited}\n"
+        f"telegram_signal_rate_limited: {summary.telegram_signal_rate_limited}\n"
+        f"candidates_seen_this_hour: {summary.candidates_seen_this_hour}\n"
+        f"candidates_stored_this_hour: {summary.candidates_stored_this_hour}\n"
+        f"telegram_signals_sent_this_hour: {summary.telegram_signals_sent_this_hour}\n"
+        f"candidate_storage_quota_remaining: {summary.candidate_storage_quota_remaining}\n"
+        f"telegram_signal_quota_remaining: {summary.telegram_signal_quota_remaining}\n"
         "filtered_by_reason:\n"
         f"  low_liquidity: {filters.get('low_liquidity', 0)}\n"
         f"  low_score: {filters.get('low_score', 0)}\n"
@@ -264,6 +298,7 @@ def _loop_status_text(store: MemeScoutStore | None = None) -> str:
 def _debug_last_scan_text(store: MemeScoutStore | None = None) -> str:
     store = store or MemeScoutStore()
     summary = ScanSummary.from_json(store.get_state("last_scan_summary", ""))
+    _hydrate_quota_fields(summary, store)
     lines = [_scan_summary_text(summary), "", "Top filtered candidates:"]
     if not summary.top_filtered:
         lines.append("none")

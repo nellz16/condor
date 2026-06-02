@@ -43,7 +43,14 @@ class ScanSummary:
     eligible_count: int = 0
     telegram_signals_sent: int = 0
     duplicate_suppressed: int = 0
-    rate_limited: bool = False
+    dex_request_rate_limited: bool = False
+    candidate_storage_rate_limited: bool = False
+    telegram_signal_rate_limited: bool = False
+    candidates_seen_this_hour: int = 0
+    candidates_stored_this_hour: int = 0
+    telegram_signals_sent_this_hour: int = 0
+    candidate_storage_quota_remaining: int = 0
+    telegram_signal_quota_remaining: int = 0
     filtered_by_reason: dict[str, int] = field(default_factory=lambda: {k: 0 for k in FILTER_KEYS})
     scanner_error: str | None = None
     top_filtered: list[dict[str, Any]] = field(default_factory=list)
@@ -100,16 +107,18 @@ async def scan_once_summary(config: Config, context: Any, store: MemeScoutStore 
     store = store or MemeScoutStore()
     settings = get_settings()
     summary = ScanSummary()
+    _refresh_quota_summary(summary, store, settings)
     if store.bool_state("emergency_stop") or store.bool_state("paused"):
         summary.scanner_error = "scanner paused or emergency stop enabled"
         store.set_state("last_scan_summary", summary.to_json())
         return summary
-    if store.recent_signal_count(3600) >= settings.max_signals_per_hour:
-        logger.info("MemeScout rate limit reached: %s signals/hour", settings.max_signals_per_hour)
-        summary.rate_limited = True
+
+    if store.counter_value("dex_requests", 60) >= settings.max_dex_requests_per_minute:
+        summary.dex_request_rate_limited = True
         store.set_state("last_scan_summary", summary.to_json())
         return summary
 
+    store.increment_counter("dex_requests", 1, 60)
     store.set_state("last_scan_at", str(time.time()))
     client = DexScreenerClient()
     try:
@@ -119,16 +128,15 @@ async def scan_once_summary(config: Config, context: Any, store: MemeScoutStore 
         logger.warning("MemeScout DEX Screener scan failed without crashing: %s", exc)
         summary.scanner_error = str(exc)[:250]
         store.set_state("last_scan_error", summary.scanner_error)
+        _refresh_quota_summary(summary, store, settings)
         store.set_state("last_scan_summary", summary.to_json())
         return summary
     for pair in pairs:
-        if store.recent_signal_count(3600) >= settings.max_signals_per_hour:
-            summary.rate_limited = True
-            break
         if store.bool_state("emergency_stop") or store.bool_state("paused"):
             summary.scanner_error = "scanner paused or emergency stop enabled"
             break
         summary.candidates_seen += 1
+        store.increment_counter("candidates_seen", 1, 3600)
         try:
             features = pair_to_features(pair)
         except Exception as exc:
@@ -162,21 +170,45 @@ async def scan_once_summary(config: Config, context: Any, store: MemeScoutStore 
             "features": {**features, **verdict},
             "explanation": explanation,
         }
-        signal_id = store.add_signal(signal)
-        summary.candidates_stored += 1
+
+        signal_id: int | None = None
+        candidate_storage_available = store.counter_value("candidates_stored", 3600) < settings.max_candidates_stored_per_hour
+        if verdict["eligible"] or candidate_storage_available:
+            signal_id = store.add_signal(signal)
+            store.increment_counter("candidates_stored", 1, 3600)
+            summary.candidates_stored += 1
+        else:
+            summary.candidate_storage_rate_limited = True
+
         if verdict["eligible"]:
             summary.eligible_count += 1
         else:
             _record_filtered(summary, features, verdict, reason, verdict.get("reject_reason") or reason)
-        if verdict["eligible"] or config.send_rejected:
-            await send_signal(context, chat_id, signal_id, signal)
-            summary.telegram_signals_sent += 1
+
+        should_send = signal_id is not None and (verdict["eligible"] or config.send_rejected)
+        if should_send:
+            if store.counter_value("telegram_signals_sent", 3600) >= settings.max_signals_per_hour:
+                summary.telegram_signal_rate_limited = True
+            else:
+                sent = await send_signal(context, chat_id, signal_id, signal)
+                if sent:
+                    summary.telegram_signals_sent += 1
+                    store.increment_counter("telegram_signals_sent", 1, 3600)
     if summary.telegram_signals_sent:
         total = int(store.get_state("telegram_signals_sent_total", "0") or 0) + summary.telegram_signals_sent
         store.set_state("telegram_signals_sent_total", str(total))
+    _refresh_quota_summary(summary, store, settings)
     store.set_state("last_scan_error", summary.scanner_error or "")
     store.set_state("last_scan_summary", summary.to_json())
     return summary
+
+
+def _refresh_quota_summary(summary: ScanSummary, store: MemeScoutStore, settings: Any) -> None:
+    summary.candidates_seen_this_hour = store.counter_value("candidates_seen", 3600)
+    summary.candidates_stored_this_hour = store.counter_value("candidates_stored", 3600)
+    summary.telegram_signals_sent_this_hour = store.counter_value("telegram_signals_sent", 3600)
+    summary.candidate_storage_quota_remaining = max(0, settings.max_candidates_stored_per_hour - summary.candidates_stored_this_hour)
+    summary.telegram_signal_quota_remaining = max(0, settings.max_signals_per_hour - summary.telegram_signals_sent_this_hour)
 
 
 def _main_filter_reason(features: dict[str, Any], verdict: dict[str, Any]) -> str:
@@ -207,9 +239,9 @@ def _record_filtered(summary: ScanSummary, features: dict[str, Any], verdict: di
         })
 
 
-async def send_signal(context: Any, chat_id: int | None, signal_id: int, signal: dict[str, Any]) -> None:
+async def send_signal(context: Any, chat_id: int | None, signal_id: int, signal: dict[str, Any]) -> bool:
     if not chat_id:
-        return
+        return False
     features = signal["features"]
     keyboard = InlineKeyboardMarkup(
         [[
@@ -219,6 +251,7 @@ async def send_signal(context: Any, chat_id: int | None, signal_id: int, signal:
     )
     text = format_signal(signal_id, signal, features)
     await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard, disable_web_page_preview=True)
+    return True
 
 
 def format_signal(signal_id: int, signal: dict[str, Any], f: dict[str, Any]) -> str:

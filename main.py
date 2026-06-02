@@ -273,6 +273,7 @@ def register_handlers(application: Application) -> None:
             memescout_emergency_stop_command, memescout_force_close_paper_command,
             memescout_loop_status_command, memescout_monitor_start_command,
             memescout_monitor_stop_command, memescout_pause_command, memescout_pnl_command,
+            memescout_reset_hourly_limits_command,
             memescout_position_command, memescout_positions_command, memescout_resume_command,
             memescout_signals_command, memescout_start_command, memescout_status_command,
             memescout_stop_command,
@@ -298,6 +299,7 @@ def register_handlers(application: Application) -> None:
         application.add_handler(CommandHandler("memescout_monitor_stop", memescout_monitor_stop_command))
         application.add_handler(CommandHandler("memescout_loop_status", memescout_loop_status_command))
         application.add_handler(CommandHandler("memescout_debug_last_scan", memescout_debug_last_scan_command))
+        application.add_handler(CommandHandler("memescout_reset_hourly_limits", memescout_reset_hourly_limits_command))
         application.add_handler(CallbackQueryHandler(memescout_callback_handler, pattern="^memescout:"))
         logger.info("Koyeb Free handlers registered: MemeScout paper-only commands only")
         return
@@ -327,6 +329,7 @@ def register_handlers(application: Application) -> None:
         memescout_force_close_paper_command, memescout_loop_status_command,
         memescout_monitor_start_command, memescout_monitor_stop_command, memescout_pause_command,
         memescout_pnl_command, memescout_position_command, memescout_positions_command,
+        memescout_reset_hourly_limits_command,
         memescout_resume_command, memescout_signals_command, memescout_start_command,
         memescout_status_command, memescout_stop_command,
     )
@@ -377,6 +380,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("memescout_monitor_stop", memescout_monitor_stop_command))
     application.add_handler(CommandHandler("memescout_loop_status", memescout_loop_status_command))
     application.add_handler(CommandHandler("memescout_debug_last_scan", memescout_debug_last_scan_command))
+    application.add_handler(CommandHandler("memescout_reset_hourly_limits", memescout_reset_hourly_limits_command))
 
     # Add callback query handler for start menu navigation
     application.add_handler(
@@ -476,6 +480,7 @@ async def post_init(application: Application) -> None:
             BotCommand("memescout_stop", "Stop MemeScout scanner loop"),
             BotCommand("memescout_monitor_stop", "Stop MemeScout monitor loop"),
             BotCommand("memescout_debug_last_scan", "Debug last MemeScout scan"),
+            BotCommand("memescout_reset_hourly_limits", "Reset MemeScout hourly counters"),
         ]
         try:
             await application.bot.set_my_commands(commands)

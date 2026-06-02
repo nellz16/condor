@@ -56,8 +56,8 @@ from condor.memescout_ai.dexscreener import DexScreenerClient
 from condor.memescout_ai.paper import approve_paper_buy, reject_signal, simulate_paper_sell
 from condor.memescout_ai.scoring import score_signal
 from condor.memescout_ai.store import MemeScoutStore
-from handlers.memescout_ai import _pnl_text, _status_text, memescout_callback_handler
-from routines.memescout_ai import Config, scan_once
+from handlers.memescout_ai import _pnl_text, _status_text, memescout_callback_handler, memescout_reset_hourly_limits_command
+from routines.memescout_ai import Config, scan_once, scan_once_summary
 
 
 @pytest.fixture()
@@ -310,3 +310,104 @@ def test_emergency_stop_blocks_learning_updates(store):
 
     store.set_state("emergency_stop", "true")
     assert maybe_generate_learning_report(store) is None
+
+
+def unique_bad_pair(symbol: str, mint: str, pair: str):
+    item = bad_pair()
+    item["baseToken"] = {"symbol": symbol, "address": mint}
+    item["pairAddress"] = pair
+    item["url"] = f"https://dexscreener.com/solana/{pair}"
+    return item
+
+
+def test_rejected_candidates_do_not_consume_telegram_signal_quota(store, monkeypatch):
+    monkeypatch.setenv("MEMESCOUT_MAX_SIGNALS_PER_HOUR", "1")
+    context = FakeContext()
+    pairs = [unique_bad_pair("BAD1", "BadMint1", "BadPair1"), unique_bad_pair("BAD2", "BadMint2", "BadPair2")]
+    with patch("routines.memescout_ai.DexScreenerClient") as client_cls:
+        client_cls.return_value.latest_solana_pairs = AsyncMock(return_value=pairs)
+        summary = asyncio.run(scan_once_summary(Config(max_pairs_per_scan=2), context, store, context._chat_id))
+    assert summary.candidates_stored == 2
+    assert summary.telegram_signals_sent == 0
+    assert summary.telegram_signals_sent_this_hour == 0
+    assert summary.telegram_signal_quota_remaining == 1
+    assert not summary.telegram_signal_rate_limited
+
+
+def test_stored_candidates_do_not_consume_telegram_signal_quota(store, monkeypatch):
+    monkeypatch.setenv("MEMESCOUT_MAX_SIGNALS_PER_HOUR", "1")
+    context = FakeContext()
+    with patch("routines.memescout_ai.DexScreenerClient") as client_cls:
+        client_cls.return_value.latest_solana_pairs = AsyncMock(return_value=[unique_bad_pair("BAD", "BadMint3", "BadPair3")])
+        summary = asyncio.run(scan_once_summary(Config(max_pairs_per_scan=1), context, store, context._chat_id))
+    assert store.stats()["signals"] == 1
+    assert summary.telegram_signals_sent_this_hour == 0
+    assert len(context.bot.sent) == 0
+
+
+def test_only_sent_telegram_signals_consume_signal_quota(store, monkeypatch):
+    monkeypatch.setenv("MEMESCOUT_MAX_SIGNALS_PER_HOUR", "1")
+    context = FakeContext()
+    with patch("routines.memescout_ai.DexScreenerClient") as client_cls:
+        client_cls.return_value.latest_solana_pairs = AsyncMock(return_value=[good_pair("SAFE1", "MintSignal1", "PairSignal1")])
+        summary = asyncio.run(scan_once_summary(Config(max_pairs_per_scan=1), context, store, context._chat_id))
+    assert summary.telegram_signals_sent == 1
+    assert summary.telegram_signals_sent_this_hour == 1
+    assert summary.telegram_signal_quota_remaining == 0
+    assert len(context.bot.sent) == 1
+
+
+def test_scanner_continues_scoring_and_storing_when_telegram_signal_rate_limited(store, monkeypatch):
+    monkeypatch.setenv("MEMESCOUT_MAX_SIGNALS_PER_HOUR", "0")
+    context = FakeContext()
+    with patch("routines.memescout_ai.DexScreenerClient") as client_cls:
+        client_cls.return_value.latest_solana_pairs = AsyncMock(return_value=[good_pair("SAFE2", "MintSignal2", "PairSignal2")])
+        summary = asyncio.run(scan_once_summary(Config(max_pairs_per_scan=1), context, store, context._chat_id))
+    assert summary.pairs_fetched == 1
+    assert summary.candidates_seen == 1
+    assert summary.candidates_stored == 1
+    assert summary.eligible_count == 1
+    assert summary.telegram_signals_sent == 0
+    assert summary.telegram_signal_rate_limited is True
+    assert store.stats()["signals"] == 1
+
+
+def test_candidate_storage_limit_skips_extra_rejected_candidates(store, monkeypatch):
+    monkeypatch.setenv("MEMESCOUT_MAX_CANDIDATES_STORED_PER_HOUR", "1")
+    context = FakeContext()
+    pairs = [unique_bad_pair("BAD4", "BadMint4", "BadPair4"), unique_bad_pair("BAD5", "BadMint5", "BadPair5")]
+    with patch("routines.memescout_ai.DexScreenerClient") as client_cls:
+        client_cls.return_value.latest_solana_pairs = AsyncMock(return_value=pairs)
+        summary = asyncio.run(scan_once_summary(Config(max_pairs_per_scan=2), context, store, context._chat_id))
+    assert summary.candidates_seen == 2
+    assert summary.candidates_stored == 1
+    assert summary.candidate_storage_rate_limited is True
+    assert store.stats()["signals"] == 1
+
+
+def test_memescout_status_shows_separate_quota_counters(store):
+    store.increment_counter("candidates_seen", 3, 3600)
+    store.increment_counter("candidates_stored", 2, 3600)
+    store.increment_counter("telegram_signals_sent", 1, 3600)
+    store.set_state("last_scan_summary", '{"candidates_seen_this_hour":3,"candidates_stored_this_hour":2,"telegram_signals_sent_this_hour":1,"candidate_storage_quota_remaining":98,"telegram_signal_quota_remaining":5}')
+    text = _status_text(store)
+    assert "candidates_seen_this_hour: 3" in text
+    assert "candidates_stored_this_hour: 2" in text
+    assert "telegram_signals_sent_this_hour: 1" in text
+    assert "candidate_storage_quota_remaining: 98" in text
+    assert "telegram_signal_quota_remaining: 5" in text
+
+
+def test_memescout_reset_hourly_limits_resets_counters_only(store, monkeypatch):
+    monkeypatch.setenv("MEMESCOUT_DB_PATH", str(store.path))
+    signal_id = add_signal(store, eligible=False)
+    store.increment_counter("candidates_seen", 3, 3600)
+    store.increment_counter("candidates_stored", 2, 3600)
+    store.increment_counter("telegram_signals_sent", 1, 3600)
+    update = SimpleNamespace(message=FakeMessage(), effective_user=SimpleNamespace(id=1, username="admin"))
+    asyncio.run(memescout_reset_hourly_limits_command.__wrapped__(update, FakeContext()))
+    assert store.get_signal(signal_id) is not None
+    assert store.counter_value("candidates_seen", 3600) == 0
+    assert store.counter_value("candidates_stored", 3600) == 0
+    assert store.counter_value("telegram_signals_sent", 3600) == 0
+    assert "trades and signals were not deleted" in update.message.replies[-1][0]
