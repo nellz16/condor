@@ -45,6 +45,8 @@ EPHEMERAL_KEYS = frozenset(
 class SafePicklePersistence(PicklePersistence):
     """PicklePersistence with atomic writes and corruption recovery."""
 
+    _missing_logged: set[Path] = set()
+
     # ------------------------------------------------------------------
     # Write: atomic temp-file → fsync → rename
     # ------------------------------------------------------------------
@@ -143,6 +145,11 @@ class SafePicklePersistence(PicklePersistence):
 
     def _try_load(self, path: Path) -> Optional[Dict[str, Any]]:
         """Attempt to load a pickle file, returning None on failure."""
+        if not path.exists():
+            if path not in self._missing_logged:
+                logger.info("Persistence file %s does not exist yet; starting with empty state", path)
+                self._missing_logged.add(path)
+            return None
         try:
             with path.open("rb") as f:
                 return _BotUnpickler(self.bot, f).load()
