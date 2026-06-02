@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import shutil
+import time
+from pathlib import Path
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from condor.memescout_ai.dexscreener import fetch_pair_by_address, pair_to_features
+from condor.memescout_ai.koyeb import koyeb_free_mode
 from condor.memescout_ai.paper import approve_paper_buy, reject_signal, simulate_paper_sell
 from condor.memescout_ai.store import MemeScoutStore
 from routines.memescout_ai import Config, scan_once
@@ -23,7 +28,8 @@ def _menu() -> InlineKeyboardMarkup:
 
 @restricted
 async def memescout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(_status_text() + "\n\nUse /routines to run the continuous memescout_ai scanner.", reply_markup=_menu())
+    hint = "Tap Scan now for Koyeb Free mode." if koyeb_free_mode() else "Use /routines to run the continuous memescout_ai scanner."
+    await update.message.reply_text(_status_text() + f"\n\n{hint}", reply_markup=_menu())
 
 
 @restricted
@@ -62,6 +68,20 @@ async def memescout_force_close_paper_command(update: Update, context: ContextTy
         await update.message.reply_text("Usage: /memescout_force_close_paper <id>")
         return
     await update.message.reply_text(await _force_close_text(trade_id))
+
+
+@restricted
+async def memescout_backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    store = MemeScoutStore()
+    backup_dir = Path("data/backups")
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_path = backup_dir / f"memescout_backup_{int(time.time())}.sqlite"
+    shutil.copy2(store.path, backup_path)
+    if hasattr(update.message, "reply_document"):
+        with backup_path.open("rb") as fh:
+            await update.message.reply_document(document=fh, filename=backup_path.name, caption="MemeScout SQLite backup (paper data only).")
+    else:
+        await update.message.reply_text(f"Backup created: {backup_path}")
 
 
 @restricted

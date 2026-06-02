@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .koyeb import ensure_data_dir, warn_if_local_sqlite_on_koyeb
 from .settings import get_settings
 
 DEFAULT_WEIGHTS = {
@@ -24,7 +25,8 @@ DEFAULT_WEIGHTS = {
 class MemeScoutStore:
     def __init__(self, path: Path | None = None):
         self.path = path or get_settings().database_path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_data_dir(self.path)
+        warn_if_local_sqlite_on_koyeb(self.path)
         self._init_db()
 
     def connect(self) -> sqlite3.Connection:

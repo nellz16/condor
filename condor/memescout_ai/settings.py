@@ -10,6 +10,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .koyeb import koyeb_free_mode
+
 
 def _env_float(name: str, default: float) -> float:
     try:
@@ -45,7 +47,7 @@ class MemeScoutSettings:
     gemini_model: str = field(default_factory=lambda: os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite"))
     helius_api_key: str = field(default_factory=lambda: os.environ.get("HELIUS_API_KEY", ""))
     monitor_enabled: bool = field(default_factory=lambda: os.environ.get("MEMESCOUT_MONITOR_ENABLED", "true").lower() != "false")
-    monitor_interval_seconds: int = field(default_factory=lambda: _env_int("MEMESCOUT_MONITOR_INTERVAL_SECONDS", 60))
+    monitor_interval_seconds: int = field(default_factory=lambda: _env_int("MEMESCOUT_MONITOR_INTERVAL_SECONDS", 120 if koyeb_free_mode() else 60))
     trailing_stop_pct: float = field(default_factory=lambda: _env_float("MEMESCOUT_TRAILING_STOP_PCT", 30.0))
     allow_risk_reducing_closes_during_emergency: bool = field(default_factory=lambda: os.environ.get("MEMESCOUT_ALLOW_RISK_REDUCING_CLOSES_DURING_EMERGENCY", "true").lower() != "false")
 

@@ -52,6 +52,7 @@ async def scan_once(config: Config, context: Any, store: MemeScoutStore | None =
         logger.info("MemeScout rate limit reached: %s signals/hour", settings.max_signals_per_hour)
         return 0
 
+    store.set_state("last_scan_at", str(__import__("time").time()))
     client = DexScreenerClient()
     try:
         pairs = await client.latest_solana_pairs(config.max_pairs_per_scan)
