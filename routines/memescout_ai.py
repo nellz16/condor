@@ -46,6 +46,7 @@ class ScanSummary:
     telegram_signals_sent: int = 0
     duplicate_suppressed: int = 0
     pairs_fetched_by_source: dict[str, int] = field(default_factory=dict)
+    source_errors: dict[str, str] = field(default_factory=dict)
     candidates_by_strategy: dict[str, int] = field(default_factory=dict)
     eligible_by_strategy: dict[str, int] = field(default_factory=dict)
     rejected_by_strategy: dict[str, int] = field(default_factory=dict)
@@ -142,7 +143,10 @@ async def scan_once_summary(config: Config, context: Any, store: MemeScoutStore 
         if not isinstance(pairs_by_source, dict):
             pairs_by_source = {"legacy_latest_solana_pairs": await client.latest_solana_pairs(config.max_pairs_per_scan)}
         for source, pairs in pairs_by_source.items():
-            summary.pairs_fetched_by_source[source] = len(pairs)
+            summary.pairs_fetched_by_source[source] = len(pairs) if isinstance(pairs, list) else 0
+        source_errors = getattr(client, "source_errors", {})
+        if isinstance(source_errors, dict):
+            summary.source_errors = {str(k): str(v)[:250] for k, v in source_errors.items()}
         summary.pairs_fetched = sum(summary.pairs_fetched_by_source.values())
     except Exception as exc:
         logger.warning("MemeScout DEX Screener scan failed without crashing: %s", exc)

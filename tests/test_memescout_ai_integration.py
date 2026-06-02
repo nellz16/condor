@@ -587,3 +587,113 @@ def test_auto_report_splits_manual_vs_auto_trades(store, monkeypatch):
         asyncio.run(scan_once_summary(Config(max_pairs_per_scan=1), context, store, context._chat_id))
     text = _pnl_text(store)
     assert "Auto paper trades: 1" in text
+
+
+def test_boosted_solana_token_addresses_method_exists():
+    client = DexScreenerClient(min_request_interval=0)
+    assert callable(getattr(client, "_boosted_solana_token_addresses", None))
+
+
+def test_latest_boosted_extracts_only_solana_token_addresses():
+    client = DexScreenerClient(min_request_interval=0)
+
+    async def fake_request(session, url, **kwargs):
+        assert "/token-boosts/latest/v1" in url
+        return [
+            {"chainId": "solana", "tokenAddress": "SolMint1"},
+            {"chainId": "ethereum", "tokenAddress": "EthMint"},
+            {"chainId": "solana", "tokenAddress": "SolMint1"},
+            {"chainId": "solana", "tokenAddress": "SolMint2"},
+            {"chainId": "solana"},
+            "bad-item",
+        ]
+
+    client._request_json = fake_request
+    tokens = asyncio.run(client._boosted_solana_token_addresses(None, "latest", 10))
+    assert tokens == ["SolMint1", "SolMint2"]
+
+
+def test_top_boosted_extracts_only_solana_token_addresses_from_dict_response():
+    client = DexScreenerClient(min_request_interval=0)
+
+    async def fake_request(session, url, **kwargs):
+        assert "/token-boosts/top/v1" in url
+        return {"tokens": [
+            {"chainId": "solana", "tokenAddress": "TopSol1"},
+            {"chainId": "base", "tokenAddress": "BaseMint"},
+            {"chainId": "solana", "tokenAddress": "TopSol2"},
+        ]}
+
+    client._request_json = fake_request
+    tokens = asyncio.run(client._boosted_solana_token_addresses(None, "top", 10))
+    assert tokens == ["TopSol1", "TopSol2"]
+
+
+def test_malformed_boosted_response_does_not_crash():
+    client = DexScreenerClient(min_request_interval=0)
+
+    async def fake_request(session, url, **kwargs):
+        return {"tokens": {"not": "a-list"}}
+
+    client._request_json = fake_request
+    assert asyncio.run(client._boosted_solana_token_addresses(None, "latest", 10)) == []
+
+
+def test_boosted_http_failure_returns_empty_list():
+    client = DexScreenerClient(min_request_interval=0)
+
+    async def fake_request(session, url, **kwargs):
+        return None
+
+    client._request_json = fake_request
+    assert asyncio.run(client._boosted_solana_token_addresses(None, "top", 10)) == []
+
+
+def test_latest_pairs_by_source_continues_when_boosted_source_fails(monkeypatch):
+    import sys as _sys
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setitem(_sys.modules, "aiohttp", SimpleNamespace(ClientSession=lambda: FakeSession()))
+    client = DexScreenerClient(min_request_interval=0)
+
+    async def fake_request(session, url, **kwargs):
+        if "/token-profiles/latest/v1" in url:
+            return [{"chainId": "solana", "tokenAddress": "ProfileMint"}]
+        if "/token-boosts/latest/v1" in url:
+            raise RuntimeError("latest boosted down")
+        if "/token-boosts/top/v1" in url:
+            return [{"chainId": "solana", "tokenAddress": "TopMint"}]
+        if "/token-pairs/v1/solana/ProfileMint" in url:
+            return [good_pair("PROFILE", "ProfileMint", "ProfilePair")]
+        if "/token-pairs/v1/solana/TopMint" in url:
+            return [good_pair("TOP", "TopMint", "TopPair")]
+        return []
+
+    client._request_json = fake_request
+    pairs_by_source = asyncio.run(client.latest_solana_pairs_by_source(limit=6))
+    assert len(pairs_by_source["latest_token_profiles"]) == 1
+    assert len(pairs_by_source["latest_boosted"]) == 0
+    assert len(pairs_by_source["top_boosted"]) == 1
+    assert "latest_boosted" in client.source_errors
+
+
+def test_scan_summary_records_boosted_source_failure_without_fatal_scanner_error(store):
+    class FakeClient:
+        source_errors = {"latest_boosted": "latest boosted down"}
+        async def latest_solana_pairs_by_source(self, limit):
+            return {"latest_token_profiles": [good_pair("PROFILE", "ProfileMint2", "ProfilePair2")], "latest_boosted": [], "top_boosted": []}
+        async def latest_solana_pairs(self, limit):
+            return []
+
+    context = FakeContext()
+    with patch("routines.memescout_ai.DexScreenerClient", return_value=FakeClient()):
+        summary = asyncio.run(scan_once_summary(Config(max_pairs_per_scan=1), context, store, context._chat_id))
+    assert summary.scanner_error is None
+    assert summary.source_errors == {"latest_boosted": "latest boosted down"}
+    assert summary.pairs_fetched_by_source.get("latest_boosted") == 0
+    assert summary.pairs_fetched_by_source.get("latest_token_profiles") == 1

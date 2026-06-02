@@ -30,6 +30,7 @@ class DexScreenerClient:
             else min_request_interval
         )
         self._last_request_at = 0.0
+        self.source_errors: dict[str, str] = {}
 
     async def latest_solana_pairs(self, limit: int = 20) -> list[dict[str, Any]]:
         pairs_by_source = await self.latest_solana_pairs_by_source(limit)
@@ -47,18 +48,37 @@ class DexScreenerClient:
     async def latest_solana_pairs_by_source(self, limit: int = 20) -> dict[str, list[dict[str, Any]]]:
         import aiohttp
 
+        self.source_errors = {}
         async with aiohttp.ClientSession() as session:
-            profiles = await self._latest_solana_token_addresses(session, limit)
-            boosted_latest = await self._boosted_solana_token_addresses(session, "latest", limit)
-            boosted_top = await self._boosted_solana_token_addresses(session, "top", limit)
+            profiles = await self._safe_token_source("latest_token_profiles", self._latest_solana_token_addresses(session, limit))
+            boosted_latest = await self._safe_token_source("latest_boosted", self._boosted_solana_token_addresses(session, "latest", limit))
+            boosted_top = await self._safe_token_source("top_boosted", self._boosted_solana_token_addresses(session, "top", limit))
             results = {
-                "latest_token_profiles": await self._pairs_for_tokens(session, profiles[: max(1, limit // 2)]),
-                "latest_boosted_tokens": await self._pairs_for_tokens(session, boosted_latest[: max(1, limit // 3)]),
-                "top_boosted_tokens": await self._pairs_for_tokens(session, boosted_top[: max(1, limit // 3)]),
+                "latest_token_profiles": await self._safe_pair_source("latest_token_profiles", self._pairs_for_tokens(session, profiles[: max(1, limit // 2)])),
+                "latest_boosted": await self._safe_pair_source("latest_boosted", self._pairs_for_tokens(session, boosted_latest[: max(1, limit // 3)])),
+                "top_boosted": await self._safe_pair_source("top_boosted", self._pairs_for_tokens(session, boosted_top[: max(1, limit // 3)])),
             }
             if get_settings().enable_dex_search:
-                results["pair_search"] = await self._search_solana_pairs(session, "solana meme", limit)
+                results["pair_search"] = await self._safe_pair_source("pair_search", self._search_solana_pairs(session, "solana meme", limit))
         return results
+
+    async def _safe_token_source(self, source: str, awaitable: Any) -> list[str]:
+        try:
+            result = await awaitable
+            return result if isinstance(result, list) else []
+        except Exception as exc:
+            logger.warning("DEX Screener %s source failed without crashing scanner: %s", source, exc)
+            self.source_errors[source] = str(exc)[:250]
+            return []
+
+    async def _safe_pair_source(self, source: str, awaitable: Any) -> list[dict[str, Any]]:
+        try:
+            result = await awaitable
+            return result if isinstance(result, list) else []
+        except Exception as exc:
+            logger.warning("DEX Screener %s pair enrichment failed without crashing scanner: %s", source, exc)
+            self.source_errors[source] = str(exc)[:250]
+            return []
 
     async def _pairs_for_tokens(self, session: Any, token_addresses: list[str]) -> list[dict[str, Any]]:
         pairs: list[dict[str, Any]] = []
@@ -85,10 +105,47 @@ class DexScreenerClient:
 
     async def _latest_solana_token_addresses(self, session: Any, limit: int) -> list[str]:
         data = await self._request_json(session, f"{BASE}/token-profiles/latest/v1")
-        tokens = []
-        for item in data if isinstance(data, list) else []:
-            if item.get("chainId") == "solana" and item.get("tokenAddress"):
-                tokens.append(str(item["tokenAddress"]))
+        return self._extract_solana_token_addresses(data, limit)
+
+    async def _boosted_solana_token_addresses(self, session: Any, boost_type: str, limit: int) -> list[str]:
+        """Return Solana token addresses from DEX Screener boosted-token sources.
+
+        DEX Screener exposes read-only boosted token metadata from:
+        - /token-boosts/latest/v1
+        - /token-boosts/top/v1
+
+        The API has returned both raw lists and dict-wrapped collections over
+        time, so this parser accepts either shape, ignores malformed entries,
+        deduplicates addresses, and returns an empty list on HTTP/source failure.
+        """
+        source = "top" if str(boost_type).lower() == "top" else "latest"
+        data = await self._request_json(session, f"{BASE}/token-boosts/{source}/v1")
+        return self._extract_solana_token_addresses(data, limit)
+
+    def _extract_solana_token_addresses(self, data: Any, limit: int) -> list[str]:
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            raw_items = data.get("tokens") or data.get("items") or data.get("data") or data.get("boosts") or []
+            items = raw_items if isinstance(raw_items, list) else []
+        else:
+            return []
+
+        tokens: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("chainId") or "").lower() != "solana":
+                continue
+            token_address = item.get("tokenAddress")
+            if not token_address:
+                continue
+            token = str(token_address)
+            if token in seen:
+                continue
+            seen.add(token)
+            tokens.append(token)
             if len(tokens) >= limit:
                 break
         return tokens
