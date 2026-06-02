@@ -30,3 +30,7 @@ dev = ["pytest", "pytest-asyncio", "black", "isort", "pre-commit"]
 
 [tool.isort]
 profile = "black"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
