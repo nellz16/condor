@@ -50,6 +50,8 @@ class MemeScoutSettings:
     monitor_interval_seconds: int = field(default_factory=lambda: _env_int("MEMESCOUT_MONITOR_INTERVAL_SECONDS", 120 if koyeb_free_mode() else 60))
     trailing_stop_pct: float = field(default_factory=lambda: _env_float("MEMESCOUT_TRAILING_STOP_PCT", 30.0))
     allow_risk_reducing_closes_during_emergency: bool = field(default_factory=lambda: os.environ.get("MEMESCOUT_ALLOW_RISK_REDUCING_CLOSES_DURING_EMERGENCY", "true").lower() != "false")
+    autostart_scanner: bool = field(default_factory=lambda: os.environ.get("MEMESCOUT_AUTOSTART_SCANNER", "false").lower() == "true")
+    autostart_monitor: bool = field(default_factory=lambda: os.environ.get("MEMESCOUT_AUTOSTART_MONITOR", "false").lower() == "true")
 
 
 def get_settings() -> MemeScoutSettings:

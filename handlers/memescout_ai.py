@@ -11,10 +11,14 @@ from telegram.ext import ContextTypes
 
 from condor.memescout_ai.dexscreener import fetch_pair_by_address, pair_to_features
 from condor.memescout_ai.koyeb import koyeb_free_mode
+from condor.memescout_ai.loops import (
+    loop_status, start_monitor_loop, start_scanner_loop, stop_monitor_loop,
+    stop_scanner_loop,
+)
 from condor.memescout_ai.paper import approve_paper_buy, reject_signal, simulate_paper_sell
 from condor.memescout_ai.store import MemeScoutStore
-from routines.memescout_ai import Config, scan_once
-from utils.auth import restricted
+from routines.memescout_ai import Config, ScanSummary, scan_once_summary
+from utils.auth import admin_required, restricted
 
 
 def _menu() -> InlineKeyboardMarkup:
@@ -84,6 +88,41 @@ async def memescout_backup_command(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(f"Backup created: {backup_path}")
 
 
+@admin_required
+async def memescout_start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    loop_context = type("MemeScoutLoopContext", (), {"bot": context.bot, "_chat_id": update.effective_chat.id})()
+    started = start_scanner_loop(loop_context)
+    await update.message.reply_text("✅ MemeScout scanner loop started." if started else "MemeScout scanner loop is already running.")
+
+
+@admin_required
+async def memescout_stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    stopped = stop_scanner_loop()
+    await update.message.reply_text("🛑 MemeScout scanner loop stopped." if stopped else "MemeScout scanner loop was not running.")
+
+
+@admin_required
+async def memescout_monitor_start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    started = start_monitor_loop()
+    await update.message.reply_text("✅ MemeScout monitor loop started." if started else "MemeScout monitor loop is already running.")
+
+
+@admin_required
+async def memescout_monitor_stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    stopped = stop_monitor_loop()
+    await update.message.reply_text("🛑 MemeScout monitor loop stopped." if stopped else "MemeScout monitor loop was not running.")
+
+
+@admin_required
+async def memescout_loop_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(_loop_status_text())
+
+
+@admin_required
+async def memescout_debug_last_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(_debug_last_scan_text())
+
+
 @restricted
 async def memescout_daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(_daily_text())
@@ -126,8 +165,8 @@ async def memescout_callback_handler(update: Update, context: ContextTypes.DEFAU
             text = "🛑 Emergency stop is ON. Scan blocked."
         else:
             context._chat_id = query.message.chat_id
-            sent = await scan_once(Config(max_pairs_per_scan=10), context, store, query.message.chat_id)
-            text = f"Scan complete. Sent {sent} signal(s)."
+            summary = await scan_once_summary(Config(max_pairs_per_scan=10), context, store, query.message.chat_id)
+            text = _scan_summary_text(summary)
     elif action == "status":
         text = _status_text(store)
     elif action == "pnl":
@@ -150,15 +189,91 @@ async def memescout_callback_handler(update: Update, context: ContextTypes.DEFAU
 def _status_text(store: MemeScoutStore | None = None) -> str:
     store = store or MemeScoutStore()
     stats = store.stats()
+    status = loop_status(store)
+    summary = ScanSummary.from_json(store.get_state("last_scan_summary", ""))
+    last_summary = (
+        f"pairs={summary.pairs_fetched}, seen={summary.candidates_seen}, "
+        f"stored={summary.candidates_stored}, eligible={summary.eligible_count}, "
+        f"sent={summary.telegram_signals_sent}, dupes={summary.duplicate_suppressed}, "
+        f"rate_limited={summary.rate_limited}, error={summary.scanner_error or 'none'}"
+    )
     return (
         "🧭 MemeScout AI Status\n"
         "Mode: PAPER ONLY (real trading disabled)\n"
-        f"Paused: {store.bool_state('paused')}\n"
-        f"Emergency stop: {store.bool_state('emergency_stop')}\n"
-        f"Signals stored: {stats['signals']}\n"
-        f"Open paper trades: {stats['open_trades']}\n"
-        f"Paper balance: ${stats['paper_balance_usdc']:.2f} USDC"
+        f"candidates_stored: {stats['signals']}\n"
+        f"eligible_signals: {_eligible_signal_count(store)}\n"
+        f"telegram_signals_sent: {store.get_state('telegram_signals_sent_total', '0')}\n"
+        f"rejected_signals: {stats['rejected_signals']}\n"
+        f"open_paper_trades: {stats['open_trades']}\n"
+        f"closed_paper_trades: {stats['closed_trades']}\n"
+        f"paper_balance: ${stats['paper_balance_usdc']:.2f} USDC\n"
+        f"scanner_loop_running: {status['scanner_loop_running']}\n"
+        f"monitor_loop_running: {status['monitor_loop_running']}\n"
+        f"last_scan_at: {status['last_scan_at']}\n"
+        f"last_scan_summary: {last_summary}\n"
+        f"emergency_stop: {store.bool_state('emergency_stop')}\n"
+        f"paused: {store.bool_state('paused')}"
     )
+
+
+def _eligible_signal_count(store: MemeScoutStore) -> int:
+    with store.connect() as db:
+        row = db.execute("SELECT COUNT(*) AS c FROM signals WHERE eligible=1").fetchone()
+    return int(row["c"])
+
+
+def _scan_summary_text(summary: ScanSummary) -> str:
+    filters = summary.filtered_by_reason
+    return (
+        "🔎 MemeScout Scan Summary\n"
+        f"pairs_fetched: {summary.pairs_fetched}\n"
+        f"candidates_seen: {summary.candidates_seen}\n"
+        f"candidates_stored: {summary.candidates_stored}\n"
+        f"eligible_count: {summary.eligible_count}\n"
+        f"telegram_signals_sent: {summary.telegram_signals_sent}\n"
+        f"duplicate_suppressed: {summary.duplicate_suppressed}\n"
+        f"rate_limited: {summary.rate_limited}\n"
+        "filtered_by_reason:\n"
+        f"  low_liquidity: {filters.get('low_liquidity', 0)}\n"
+        f"  low_score: {filters.get('low_score', 0)}\n"
+        f"  high_rug_risk: {filters.get('high_rug_risk', 0)}\n"
+        f"  malformed_pair: {filters.get('malformed_pair', 0)}\n"
+        f"  missing_price: {filters.get('missing_price', 0)}\n"
+        f"  too_old: {filters.get('too_old', 0)}\n"
+        f"  too_new: {filters.get('too_new', 0)}\n"
+        f"  other: {filters.get('other', 0)}\n"
+        f"scanner_error: {summary.scanner_error or 'none'}"
+    )
+
+
+def _loop_status_text(store: MemeScoutStore | None = None) -> str:
+    status = loop_status(store or MemeScoutStore())
+    return (
+        "🔁 MemeScout Loop Status\n"
+        f"scanner_loop_running: {status['scanner_loop_running']}\n"
+        f"monitor_loop_running: {status['monitor_loop_running']}\n"
+        f"last_scan_at: {status['last_scan_at']}\n"
+        f"last_monitor_at: {status['last_monitor_at']}\n"
+        f"last_scan_error: {status['last_scan_error'] or 'none'}\n"
+        f"last_monitor_error: {status['last_monitor_error'] or 'none'}\n"
+        f"next_scan_eta_seconds: {status['next_scan_eta_seconds']}\n"
+        f"next_monitor_eta_seconds: {status['next_monitor_eta_seconds']}"
+    )
+
+
+def _debug_last_scan_text(store: MemeScoutStore | None = None) -> str:
+    store = store or MemeScoutStore()
+    summary = ScanSummary.from_json(store.get_state("last_scan_summary", ""))
+    lines = [_scan_summary_text(summary), "", "Top filtered candidates:"]
+    if not summary.top_filtered:
+        lines.append("none")
+    for item in summary.top_filtered[:5]:
+        lines.append(
+            f"- {item.get('token_symbol')} pair={item.get('pair_address')} score={item.get('score')} "
+            f"rug={item.get('rug_risk')} reason={item.get('main_rejection_reason')} "
+            f"liq={item.get('liquidity')} vol={item.get('volume')} age={item.get('age')}"
+        )
+    return "\n".join(lines)
 
 
 def _pnl_text(store: MemeScoutStore | None = None) -> str:

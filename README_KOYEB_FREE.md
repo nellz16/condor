@@ -21,6 +21,8 @@ KOYEB_FREE_MODE=true
 PORT=8000
 MEMESCOUT_LOW_MEMORY_MODE=true
 MEMESCOUT_DISABLE_FULL_HUMMINGBOT_API=true
+MEMESCOUT_AUTOSTART_SCANNER=true
+MEMESCOUT_AUTOSTART_MONITOR=true
 
 MEMESCOUT_PAPER_ONLY=true
 MEMESCOUT_DB_PATH=data/memescout_ai.sqlite
@@ -82,13 +84,31 @@ Koyeb Free cannot attach persistent volumes. `MEMESCOUT_DB_PATH=data/memescout_a
 
 Do not treat Koyeb Free SQLite as durable long-term storage. Postgres support is intentionally not added in this step.
 
+## Koyeb MemeScout loop controls
+
+`/routines` is intentionally disabled in `KOYEB_FREE_MODE=true` because Koyeb Free mode registers only MemeScout paper-only handlers. Use these commands instead:
+
+- `/memescout_start` — start the paper scanner loop.
+- `/memescout_stop` — stop the paper scanner loop.
+- `/memescout_monitor_start` — start the paper position monitor loop.
+- `/memescout_monitor_stop` — stop the paper position monitor loop.
+- `/memescout_loop_status` — show loop state, last scan/monitor timestamps, errors, and ETA.
+- `/memescout_debug_last_scan` — show last scan summary and top filtered candidates.
+
+For 24/7 operation on Koyeb, set `MEMESCOUT_AUTOSTART_SCANNER=true` and `MEMESCOUT_AUTOSTART_MONITOR=true`. Autostart is duplicate-safe inside the running process.
+
+`Scan now` may store candidates but send `0` Telegram signals when all candidates are rejected by filters, duplicate suppression, or hourly rate limits. Use `/memescout_debug_last_scan` to see why.
+
 ## Telegram smoke test
 
 1. Deploy to Koyeb.
 2. Open `https://<koyeb-app>.koyeb.app/healthz` and confirm `OK`.
 3. Send `/memescout_status` in Telegram.
-4. Send `/memescout` and tap **Scan now**.
-5. Use `/memescout_positions`, `/memescout_pnl`, and `/memescout_backup`.
+4. Send `/memescout_loop_status`.
+5. If autostart is off, send `/memescout_start` and `/memescout_monitor_start`.
+6. Send `/memescout` and tap **Scan now**.
+7. If it sends 0 signals, send `/memescout_debug_last_scan`.
+8. Use `/memescout_positions`, `/memescout_pnl`, and `/memescout_backup`.
 
 ## Safety reminder
 

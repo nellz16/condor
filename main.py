@@ -269,10 +269,13 @@ def register_handlers(application: Application) -> None:
     if koyeb_free_mode():
         from handlers.memescout_ai import (
             memescout_backup_command, memescout_callback_handler, memescout_command,
-            memescout_daily_command, memescout_emergency_stop_command,
-            memescout_force_close_paper_command, memescout_pause_command,
-            memescout_pnl_command, memescout_position_command, memescout_positions_command,
-            memescout_resume_command, memescout_signals_command, memescout_status_command,
+            memescout_daily_command, memescout_debug_last_scan_command,
+            memescout_emergency_stop_command, memescout_force_close_paper_command,
+            memescout_loop_status_command, memescout_monitor_start_command,
+            memescout_monitor_stop_command, memescout_pause_command, memescout_pnl_command,
+            memescout_position_command, memescout_positions_command, memescout_resume_command,
+            memescout_signals_command, memescout_start_command, memescout_status_command,
+            memescout_stop_command,
         )
 
         application.handlers.clear()
@@ -289,6 +292,12 @@ def register_handlers(application: Application) -> None:
         application.add_handler(CommandHandler("memescout_resume", memescout_resume_command))
         application.add_handler(CommandHandler("memescout_emergency_stop", memescout_emergency_stop_command))
         application.add_handler(CommandHandler("memescout_backup", memescout_backup_command))
+        application.add_handler(CommandHandler("memescout_start", memescout_start_command))
+        application.add_handler(CommandHandler("memescout_stop", memescout_stop_command))
+        application.add_handler(CommandHandler("memescout_monitor_start", memescout_monitor_start_command))
+        application.add_handler(CommandHandler("memescout_monitor_stop", memescout_monitor_stop_command))
+        application.add_handler(CommandHandler("memescout_loop_status", memescout_loop_status_command))
+        application.add_handler(CommandHandler("memescout_debug_last_scan", memescout_debug_last_scan_command))
         application.add_handler(CallbackQueryHandler(memescout_callback_handler, pattern="^memescout:"))
         logger.info("Koyeb Free handlers registered: MemeScout paper-only commands only")
         return
@@ -314,10 +323,12 @@ def register_handlers(application: Application) -> None:
     from handlers.routines import routines_callback_handler, routines_command
     from handlers.memescout_ai import (
         memescout_backup_command, memescout_callback_handler, memescout_command, memescout_daily_command,
-        memescout_emergency_stop_command, memescout_force_close_paper_command,
-        memescout_pause_command, memescout_pnl_command, memescout_position_command,
-        memescout_positions_command, memescout_resume_command, memescout_signals_command,
-        memescout_status_command,
+        memescout_debug_last_scan_command, memescout_emergency_stop_command,
+        memescout_force_close_paper_command, memescout_loop_status_command,
+        memescout_monitor_start_command, memescout_monitor_stop_command, memescout_pause_command,
+        memescout_pnl_command, memescout_position_command, memescout_positions_command,
+        memescout_resume_command, memescout_signals_command, memescout_start_command,
+        memescout_status_command, memescout_stop_command,
     )
     from handlers.trading import trade_command as unified_trade_command
     from handlers.trading.router import unified_trade_callback_handler
@@ -360,6 +371,12 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("memescout_resume", memescout_resume_command))
     application.add_handler(CommandHandler("memescout_emergency_stop", memescout_emergency_stop_command))
     application.add_handler(CommandHandler("memescout_backup", memescout_backup_command))
+    application.add_handler(CommandHandler("memescout_start", memescout_start_command))
+    application.add_handler(CommandHandler("memescout_stop", memescout_stop_command))
+    application.add_handler(CommandHandler("memescout_monitor_start", memescout_monitor_start_command))
+    application.add_handler(CommandHandler("memescout_monitor_stop", memescout_monitor_stop_command))
+    application.add_handler(CommandHandler("memescout_loop_status", memescout_loop_status_command))
+    application.add_handler(CommandHandler("memescout_debug_last_scan", memescout_debug_last_scan_command))
 
     # Add callback query handler for start menu navigation
     application.add_handler(
@@ -453,6 +470,12 @@ async def post_init(application: Application) -> None:
             BotCommand("memescout_positions", "MemeScout paper positions"),
             BotCommand("memescout_daily", "MemeScout daily report"),
             BotCommand("memescout_backup", "Download MemeScout SQLite backup"),
+            BotCommand("memescout_start", "Start MemeScout scanner loop"),
+            BotCommand("memescout_monitor_start", "Start MemeScout monitor loop"),
+            BotCommand("memescout_loop_status", "MemeScout loop status"),
+            BotCommand("memescout_stop", "Stop MemeScout scanner loop"),
+            BotCommand("memescout_monitor_stop", "Stop MemeScout monitor loop"),
+            BotCommand("memescout_debug_last_scan", "Debug last MemeScout scan"),
         ]
         try:
             await application.bot.set_my_commands(commands)
@@ -461,6 +484,11 @@ async def post_init(application: Application) -> None:
         from condor.routine_store import get_routine_store
 
         get_routine_store().set_bot(application.bot)
+        from condor.memescout_ai.loops import autostart_loops
+
+        autostart = autostart_loops(application.bot, int(ADMIN_USER_ID) if ADMIN_USER_ID else None)
+        if autostart["scanner_started"] or autostart["monitor_started"]:
+            logger.info("MemeScout autostart loops: %s", autostart)
         logger.info("Koyeb Free post-init completed without full Hummingbot/Gateway integrations")
         return
 
@@ -718,6 +746,14 @@ async def _run_dual(application: Application) -> None:
     await application.initialize()
     await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     await application.start()
+
+    if koyeb_free_mode():
+        from utils.config import ADMIN_USER_ID
+        from condor.memescout_ai.loops import autostart_loops
+
+        autostart = autostart_loops(application.bot, int(ADMIN_USER_ID) if ADMIN_USER_ID else None)
+        if autostart["scanner_started"] or autostart["monitor_started"]:
+            logger.info("MemeScout autostart loops after Telegram startup: %s", autostart)
 
     server = None
     web_task = None

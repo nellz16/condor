@@ -42,6 +42,7 @@ def restricted(func):
     wrapped.__wrapped__ = func
     return wrapped
 utils_auth.restricted = restricted
+utils_auth.admin_required = restricted
 sys.modules["utils.auth"] = utils_auth
 
 import time

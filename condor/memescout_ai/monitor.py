@@ -31,6 +31,9 @@ async def monitor_once(store: MemeScoutStore | None = None) -> dict[str, int]:
         store.bool_state("emergency_stop")
         and not settings.allow_risk_reducing_closes_during_emergency
     )
+    import time
+
+    store.set_state("last_monitor_at", str(time.time()))
     for trade in store.list_open_trades():
         results["checked"] += 1
         pair_address = trade.get("pair_address") or ""
@@ -49,6 +52,7 @@ async def monitor_once(store: MemeScoutStore | None = None) -> dict[str, int]:
         except Exception as exc:
             logger.warning("MemeScout monitor skipped trade %s without crashing: %s", trade.get("id"), exc)
             store.mark_monitor_error(int(trade["id"]), f"price fetch failed: {exc}")
+            store.set_state("last_monitor_error", str(exc)[:250])
             results["errors"] += 1
             continue
 
@@ -61,6 +65,8 @@ async def monitor_once(store: MemeScoutStore | None = None) -> dict[str, int]:
             await apply_exit_rules(store, updated, price)
             after_exits = len(store.list_exits(int(trade["id"])))
             results["exits"] += max(0, after_exits - before_exits)
+    if results["errors"] == 0:
+        store.set_state("last_monitor_error", "")
     maybe_generate_learning_report(store)
     return results
 
