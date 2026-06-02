@@ -284,6 +284,13 @@ def register_handlers(application: Application) -> None:
     from handlers.executors import executors_callback_handler, executors_command
     from handlers.portfolio import get_portfolio_callback_handler, portfolio_command
     from handlers.routines import routines_callback_handler, routines_command
+    from handlers.memescout_ai import (
+        memescout_callback_handler, memescout_command, memescout_daily_command,
+        memescout_emergency_stop_command, memescout_force_close_paper_command,
+        memescout_pause_command, memescout_pnl_command, memescout_position_command,
+        memescout_positions_command, memescout_resume_command, memescout_signals_command,
+        memescout_status_command,
+    )
     from handlers.trading import trade_command as unified_trade_command
     from handlers.trading.router import unified_trade_callback_handler
 
@@ -313,6 +320,17 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CommandHandler("update", update_command))
     application.add_handler(CommandHandler("web", web_command))
+    application.add_handler(CommandHandler("memescout", memescout_command))
+    application.add_handler(CommandHandler("memescout_status", memescout_status_command))
+    application.add_handler(CommandHandler("memescout_signals", memescout_signals_command))
+    application.add_handler(CommandHandler("memescout_pnl", memescout_pnl_command))
+    application.add_handler(CommandHandler("memescout_positions", memescout_positions_command))
+    application.add_handler(CommandHandler("memescout_position", memescout_position_command))
+    application.add_handler(CommandHandler("memescout_force_close_paper", memescout_force_close_paper_command))
+    application.add_handler(CommandHandler("memescout_daily", memescout_daily_command))
+    application.add_handler(CommandHandler("memescout_pause", memescout_pause_command))
+    application.add_handler(CommandHandler("memescout_resume", memescout_resume_command))
+    application.add_handler(CommandHandler("memescout_emergency_stop", memescout_emergency_stop_command))
 
     # Add callback query handler for start menu navigation
     application.add_handler(
@@ -335,6 +353,10 @@ def register_handlers(application: Application) -> None:
     )
     application.add_handler(
         CallbackQueryHandler(executors_callback_handler, pattern="^executors:")
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(memescout_callback_handler, pattern="^memescout:")
     )
 
     # Add agent callback handler
@@ -423,6 +445,10 @@ async def post_init(application: Application) -> None:
         BotCommand("bots", "Deploy and manage trading bots"),
         BotCommand("new_bot", "Create bot configurations"),
         BotCommand("routines", "Run configurable Python scripts"),
+        BotCommand("memescout", "Paper-only memecoin research"),
+        BotCommand("memescout_status", "MemeScout status"),
+        BotCommand("memescout_pnl", "MemeScout paper PnL"),
+        BotCommand("memescout_positions", "MemeScout paper positions"),
         BotCommand("trade", "Place CEX and DEX orders"),
         BotCommand("lp", "Liquidity pool management"),
         BotCommand("servers", "Manage Hummingbot API servers"),
